@@ -1,41 +1,75 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="varjo logo: a purple shadow sprite with a terminal-prompt face">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="varjo logo: a hooded shadow figure with glowing violet eyes">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1b1038"/>
-      <stop offset="1" stop-color="#090513"/>
+      <stop offset="0" stop-color="#1b1338"/>
+      <stop offset="1" stop-color="#07040f"/>
     </linearGradient>
-    <linearGradient id="body" x1="0.15" y1="0" x2="0.85" y2="1">
-      <stop offset="0" stop-color="#5a46a4"/>
-      <stop offset="1" stop-color="#241a50"/>
+    <linearGradient id="hood" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#5b45b0"/>
+      <stop offset="0.5" stop-color="#31246c"/>
+      <stop offset="1" stop-color="#1a1240"/>
     </linearGradient>
-    <radialGradient id="aura" cx="0.5" cy="0.55" r="0.5">
-      <stop offset="0" stop-color="#8b5cf6" stop-opacity="0.5"/>
-      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    <linearGradient id="facet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9079ee"/>
+      <stop offset="1" stop-color="#4a3796" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#0d0820"/>
+      <stop offset="0.35" stop-color="#04020a"/>
+      <stop offset="1" stop-color="#04020a"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e6ddff"/>
+      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0.15"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="0.5" cy="0.4" r="0.5">
+      <stop offset="0" stop-color="#7c3aed" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#7c3aed" stop-opacity="0"/>
     </radialGradient>
-    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="7" result="b"/>
-      <feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
+    <filter id="haze" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <clipPath id="badge"><rect x="14" y="14" width="484" height="484" rx="92"/></clipPath>
   </defs>
 
-  <!-- badge: dark gradient with a violet rim so the mark stays visible on dark pages -->
-  <rect x="14" y="14" width="484" height="484" rx="116" fill="url(#bg)" stroke="#8b5cf6" stroke-opacity="0.65" stroke-width="4"/>
-  <ellipse cx="256" cy="310" rx="190" ry="160" fill="url(#aura)"/>
+  <rect x="14" y="14" width="484" height="484" rx="92" fill="url(#bg)"/>
+  <ellipse cx="256" cy="260" rx="220" ry="210" fill="url(#aura)"/>
 
-  <!-- the shadow behind the sprite (varjo = shadow) -->
-  <path transform="translate(26 22)" opacity="0.35"
-        d="M256 118 C 150 118 120 206 120 282 L 120 392 Q 154 420 188 392 Q 222 420 256 392 Q 290 420 324 392 Q 358 420 392 392 L 392 282 C 392 206 362 118 256 118 Z"
-        fill="#0b0618"/>
+  <g clip-path="url(#badge)">
+    <!-- cast shadow -->
+    <path transform="translate(36 10)" opacity="0.6" filter="url(#haze)"
+          d="M44 520 C 56 390 110 310 158 246 C 176 152 212 104 256 104 C 300 104 336 152 354 246 C 402 310 456 390 468 520 Z" fill="#03010a"/>
 
-  <!-- sprite body -->
-  <path d="M256 118 C 150 118 120 206 120 282 L 120 392 Q 154 420 188 392 Q 222 420 256 392 Q 290 420 324 392 Q 358 420 392 392 L 392 282 C 392 206 362 118 256 118 Z"
-        fill="url(#body)" stroke="#a78bfa" stroke-opacity="0.9" stroke-width="3.5"/>
-  <!-- rim light -->
-  <path d="M 252 118 C 150 118 120 206 120 282" fill="none" stroke="#d8ccff" stroke-width="6" stroke-linecap="round" opacity="0.75"/>
+    <!-- hood / cloak bust -->
+    <path d="M44 520 C 56 390 110 310 158 246 C 176 152 212 104 256 104 C 300 104 336 152 354 246 C 402 310 456 390 468 520 Z"
+          fill="url(#hood)" stroke="#b9a4ff" stroke-opacity="0.8" stroke-width="3"/>
+    <!-- lit facet, upper left of the hood -->
+    <path d="M256 104 C 212 104 176 152 158 246 C 130 284 104 330 84 390 C 120 320 150 280 186 250 C 196 190 222 148 256 128 Z" fill="url(#facet)" opacity="0.9"/>
+    <!-- folds -->
+    <path d="M174 262 C 150 330 118 400 100 520" fill="none" stroke="#7b63d8" stroke-opacity="0.45" stroke-width="2.5"/>
+    <path d="M338 262 C 362 330 394 400 412 520" fill="none" stroke="#7b63d8" stroke-opacity="0.45" stroke-width="2.5"/>
 
-  <!-- face: a terminal prompt  > _  -->
-  <g fill="none" stroke="#efe6ff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
-    <path d="M 188 232 L 226 268 L 188 304"/>
-    <path d="M 268 304 L 330 304"/>
+    <!-- face in darkness -->
+    <path d="M256 158 C 302 158 332 220 332 300 L 334 412 L 256 480 L 178 412 L 180 300 C 180 220 210 158 256 158 Z" fill="url(#face)"/>
+    <path d="M256 158 C 302 158 332 220 332 300 L 334 412 L 256 480 L 178 412 L 180 300 C 180 220 210 158 256 158 Z" fill="none" stroke="#c9b8ff" stroke-opacity="0.35" stroke-width="2"/>
+    <!-- cloak edges crossing below the chin -->
+    <path d="M148 520 L 256 480 L 334 412" fill="none" stroke="#b9a4ff" stroke-opacity="0.6" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M364 520 L 256 480 L 178 412" fill="none" stroke="#b9a4ff" stroke-opacity="0.6" stroke-width="3" stroke-linejoin="round"/>
+
+    <!-- rim light along the hood -->
+    <path d="M256 104 C 212 104 176 152 158 246 C 134 278 110 318 92 368" fill="none" stroke="url(#edge)" stroke-width="7" stroke-linecap="round"/>
+    <path d="M256 104 C 300 104 336 152 354 246" fill="none" stroke="#a894ff" stroke-opacity="0.45" stroke-width="3" stroke-linecap="round"/>
+
+    <!-- eyes -->
+    <g fill="#f3eeff" filter="url(#glow)">
+      <path d="M200 298 L 246 278 L 244 296 L 208 310 Z"/>
+      <path d="M312 298 L 266 278 L 268 296 L 304 310 Z"/>
+    </g>
   </g>
+
+  <rect x="14" y="14" width="484" height="484" rx="92" fill="none" stroke="#8b5cf6" stroke-opacity="0.65" stroke-width="4"/>
 </svg>
