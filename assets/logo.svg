@@ -57,33 +57,33 @@
     <g transform="rotate(-4 256 300)">
       <!-- cast shadow -->
       <path transform="translate(38 12)" opacity="0.65" filter="url(#haze)"
-            d="M28 520 C 48 408 86 332 124 286 L 104 296 L 150 254 C 158 168 198 110 270 86 C 318 118 348 176 358 244 L 400 282 L 382 288 C 428 346 468 420 484 520 Z" fill="#02010a"/>
+            d="M28 520 C 48 408 86 332 124 286 L 104 296 L 150 254 C 152 190 164 130 194 62 C 212 96 234 124 256 136 C 278 124 300 96 318 62 C 348 130 356 190 358 244 L 400 282 L 382 288 C 428 346 468 420 484 520 Z" fill="#02010a"/>
 
       <!-- hood / cloak -->
-      <path d="M28 520 C 48 408 86 332 124 286 L 104 296 L 150 254 C 158 168 198 110 270 86 C 318 118 348 176 358 244 L 400 282 L 382 288 C 428 346 468 420 484 520 Z"
+      <path d="M28 520 C 48 408 86 332 124 286 L 104 296 L 150 254 C 152 190 164 130 194 62 C 212 96 234 124 256 136 C 278 124 300 96 318 62 C 348 130 356 190 358 244 L 400 282 L 382 288 C 428 346 468 420 484 520 Z"
             fill="url(#hood)" stroke="#bda8ff" stroke-opacity="0.85" stroke-width="3" stroke-linejoin="round"/>
       <!-- lit facet upper left -->
-      <path d="M270 86 C 198 110 158 168 150 254 L 104 296 L 124 286 C 96 330 70 390 56 460 C 92 360 128 304 176 262 C 190 190 220 130 270 100 Z" fill="url(#facet)" opacity="0.9"/>
+      <path d="M194 62 C 164 130 152 190 150 254 L 104 296 L 124 286 C 96 330 70 390 56 460 C 92 360 128 304 176 262 C 180 200 188 140 208 92 Z" fill="url(#facet)" opacity="0.9"/>
       <!-- angular folds -->
       <path d="M168 270 L 146 352 L 118 520" fill="none" stroke="#8469e6" stroke-opacity="0.5" stroke-width="2.5" stroke-linejoin="round"/>
       <path d="M344 262 L 372 350 L 404 520" fill="none" stroke="#8469e6" stroke-opacity="0.45" stroke-width="2.5" stroke-linejoin="round"/>
 
       <!-- face in darkness, pointed arch -->
-      <path d="M200 214 L 226 166 L 262 232 L 298 162 L 322 214 C 334 250 336 280 334 312 L 338 420 L 256 492 L 174 420 L 178 312 C 178 280 184 246 200 214 Z" fill="url(#face)"/>
-      <path d="M200 214 L 226 166 L 262 232 L 298 162 L 322 214 C 334 250 336 280 334 312 L 338 420 L 256 492 L 174 420 L 178 312 C 178 280 184 246 200 214 Z" fill="none" stroke="#c9b8ff" stroke-opacity="0.4" stroke-width="2"/>
+      <path d="M200 214 L 226 178 L 262 236 L 298 174 L 322 214 C 334 250 336 280 334 312 L 338 420 L 256 492 L 174 420 L 178 312 C 178 280 184 246 200 214 Z" fill="url(#face)"/>
+      <path d="M200 214 L 226 178 L 262 236 L 298 174 L 322 214 C 334 250 336 280 334 312 L 338 420 L 256 492 L 174 420 L 178 312 C 178 280 184 246 200 214 Z" fill="none" stroke="#c9b8ff" stroke-opacity="0.4" stroke-width="2"/>
 
       <!-- cloak edges crossing below the chin -->
       <path d="M140 520 L 256 492 L 338 420" fill="none" stroke="#bda8ff" stroke-opacity="0.65" stroke-width="3" stroke-linejoin="round"/>
       <path d="M372 520 L 256 492 L 174 420" fill="none" stroke="#bda8ff" stroke-opacity="0.65" stroke-width="3" stroke-linejoin="round"/>
 
       <!-- rim light -->
-      <path d="M270 86 C 198 110 158 168 150 254 L 104 296" fill="none" stroke="url(#edge)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="M270 86 C 318 118 348 176 358 244" fill="none" stroke="#b39dff" stroke-opacity="0.5" stroke-width="3" stroke-linecap="round"/>
+      <path d="M194 62 C 164 130 152 190 150 254 L 104 296" fill="none" stroke="url(#edge)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M318 62 C 348 130 356 190 358 244" fill="none" stroke="#b39dff" stroke-opacity="0.5" stroke-width="3" stroke-linecap="round"/>
 
       <!-- eyes: sharp inward-slanted slits -->
       <g fill="#ffffff" filter="url(#eyeglow)">
-        <path d="M184 306 L 250 274 L 248 290 L 200 322 Z"/>
-        <path d="M332 304 L 266 274 L 268 290 L 316 320 Z"/>
+        <path d="M184 272 L 250 304 L 248 320 L 200 288 Z"/>
+        <path d="M332 270 L 266 304 L 268 320 L 316 286 Z"/>
       </g>
     </g>
   </g>
