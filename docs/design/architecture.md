@@ -17,7 +17,7 @@ Spec: [docs/requirements.md](../requirements.md) (unchanged; corrections are lis
 
 | Requirements section | Assumption | What the research found | Consequence |
 |---|---|---|---|
-| §4.3, §9 Phase 0 | CLI-created sessions on botPC can show up in Claude Desktop on mainPC | Desktop over SSH lists only sessions Desktop starts; no session-ID deep link; `claude --desktop --resume` is local-only (remote-access.md §A). RC is the documented path to claude.ai/code, phone and Desktop (remote-access.md §B, claude-code.md §17.1) | RC is primary (D1). Desktop SSH is an interactive fallback. Experiment #11 decides launch mode M1 vs M2 |
+| §4.3, §9 Phase 0 | CLI-created sessions on botPC can show up in Claude Desktop on mainPC | Desktop over SSH lists only sessions Desktop starts; no session-ID deep link; `claude --desktop --resume` is local-only (remote-access.md §A). RC is the documented path to claude.ai/code, phone and Desktop (remote-access.md §B, claude-code.md §17.1) | RC is primary (D1). Desktop SSH is an interactive fallback. Experiment #11 passed and selected M2 + arm-ahead (headless `-p` summary, then `--bg --resume --remote-control`; section 4.3) |
 | §2.3, §9 Phase 0 | Dispatch may run tasks in botPC repos | Dispatch cannot target a machine or repo; it needs Desktop running on the paired computer; limited beta, closed to new users (remote-access.md §C) | Dispatch is out of scope; #13 is confirmation only |
 | §8 | Agent SDK / Dispatch are options for AI execution and phone control | Anthropic docs steer SDK users to API keys and bar claude.ai login for third-party products; non-bare `claude -p` uses the subscription (claude-code.md §7, max-plan.md §2) | Drive the CLI (`claude -p`, `--bg`, `--worktree`) from launchd-managed code; no `@anthropic-ai/claude-agent-sdk` |
 | §5.4 | A Skill/Hook can fire "at PR creation" | No commit/push/PR hook event exists (claude-code.md §3, §17.4) | `PostToolUse` hook with `if: "Bash(gh pr create *)"` (D8); unconfirmed in `-p` runs |
@@ -43,7 +43,7 @@ Spec: [docs/requirements.md](../requirements.md) (unchanged; corrections are lis
 | PR ↔ session mapping | `--from-pr` (interactive helper only) | **yes** | `--from-pr` storage and `-p` coverage unconfirmed (claude-code.md §11) |
 | Session create/resume | `--session-id`, `--resume`, `-p --resume` | no | varjo supplies the UUID and stores it (claude-code.md §1) |
 | Headless review summary | `claude -p --json-schema` | prompt + schema only | claude-code.md §2, §14 |
-| Background per-PR worker | `--bg`, `attach`, `logs`, `stop`, `respawn`, `agents` | no (mode M1) | claude-code.md §10 |
+| Background per-PR worker | `--bg`, `attach`, `logs`, `stop`, `respawn`, `agents` | no (process holder for the RC half of M2) | claude-code.md §10 |
 | Notification to mainPC/phone | Stop/Notification hooks, RC push notifications | **yes** (adapter) | Channel is open decision O2; RC push covers only RC-connected sessions |
 | Usage-limit handling | none | **yes** (guard) | max-plan.md §4, "Proposed limit-handling behavior" |
 | Unattended auth | `claude auth login`, `claude setup-token` | config only | Secure token storage only (claude-code.md §12) |
@@ -74,7 +74,7 @@ All components live in one Node process per invocation (`varjo poll` from launch
 - Inputs: normalized events. Outputs: the work queue (events with status `new`) grouped by PR. Multiple new events on one PR in one cycle are batched into one run.
 - Failure handling: crash mid-run leaves the lease to expire (`lease_until`); events stay `queued` and are retried subject to the limit guard. Schema: section 5.
 
-### 4.3 Session launcher (one interface, two implementations)
+### 4.3 Session launcher (one interface, one implementation)
 
 ```ts
 interface SessionLauncher {
@@ -84,10 +84,14 @@ interface SessionLauncher {
 ```
 
 - Shared: varjo generates the UUID and stores it before launching; permission and model settings come from per-repo config; PR comment text is passed as delimited data (section 8).
-- **M1 (`BgRcLauncher`)**: `claude --bg --remote-control --session-id <uuid> --worktree "#<n>" "<prompt>"`. The notification carries the claude.ai/code URL. Follow-ups: `claude --bg --resume <uuid>` (continues under the same ID; a copy with a `note:` line if already running). Summary text is collected by a `Stop` hook (`last_assistant_message`) or `claude logs`. Unconfirmed: whether `--bg` + `--remote-control` combine, how the URL is obtained programmatically, whether Remote Control starts without an interactive confirmation (claude-code.md §10, remote-access.md §B; #11).
-- **M2 (`HeadlessTmuxLauncher`)**: `claude -p --session-id <uuid> --output-format json --json-schema <schema> --permission-mode dontAsk --permission-prompts none --allowedTools <list> --max-turns <n> --model sonnet --effort low`, cwd = worktree. The structured summary is sent in the notification together with the command `varjo open <pr>`, which on botPC runs `claude --resume <uuid> --remote-control` in a tmux session. Follow-ups: `claude -p --resume <uuid> ...`. Unconfirmed: `--resume ... --remote-control` re-attaching a `-p` session to claude.ai/code (remote-access.md §B, Phase 0 order step 3).
-- Credentials: M1 and the interactive half of M2 run with the `claude auth login` credential (RC requires it), so `CLAUDE_CODE_OAUTH_TOKEN` must not be in their environment. The token is injected only into headless `-p` children. `ANTHROPIC_API_KEY` is stripped from every child environment; `--bare` is never passed.
-- Safety flags (Phase 1, D6): `--permission-mode dontAsk`, allowlist `Read`, `Grep`, `Glob`, `Bash(gh pr view *)`, `Bash(gh pr diff *)`, `Bash(git log *)`, `Bash(git diff *)`; `--max-turns`; wall-clock timeout; default `--model sonnet --effort low`, overridable per repo. Phase 2 fix runs: `--permission-mode acceptEdits` inside the worktree; pushes stay human-approved.
+- **`HeadlessBgLauncher` (M2 + arm-ahead, selected by #11)**: two commands per first review, both with cwd = worktree.
+  1. Headless summary: `claude -p <prompt> --session-id <uuid> --output-format json --json-schema <schema> --permission-mode dontAsk --permission-prompts none --allowedTools <list> --max-turns <n> --model sonnet --effort low < /dev/null`. The prompt precedes the variadic flags (`--allowedTools` swallows a trailing positional prompt); stdin is `/dev/null` (or the prompt) to avoid the 3 s stdin wait.
+  2. Arm-ahead, immediately after the summary: `claude --bg --resume <uuid> --remote-control --permission-mode <mode> -n pr-<n>`. `--bg` is the process holder (no tmux). It prints the bg id (stored as `bg_id`); the URL `https://claude.ai/code/session_01...` is never on stdout, so varjo polls `claude logs <bg-id>` until the URL regex matches and stores it as `rc_url`. The real session UUID is verified from `claude agents --json` (`sessionId`, `state`).
+  3. The notification carries the structured summary plus `rc_url`, so the phone needs no SSH. The headless history is visible on claude.ai/code, phone and Desktop; turns typed on the phone land in the same local `.jsonl` and a later `-p --resume` sees them.
+  4. Automation follow-ups on a session already armed: `claude stop <bg-id>`, then `claude -p <prompt> --resume <uuid> ...`, then `claude respawn <bg-id>` (same session id and URL). Never re-run `claude --bg --resume <uuid> --remote-control` against a stopped-but-retained bg entry: it starts a copy with a new session id (the entry keeps its own saved options). `--resume ... --remote-control` keeps the UUID only when no bg entry exists for it yet.
+- M1 (`claude --bg --remote-control --session-id <uuid> --worktree ...` directly) was rejected: `--bg` ignores `--session-id` ("--bg manages the session id"), so varjo could not choose the UUID up front, and a `--bg` session runs in the machine's default permission mode (auto on the test Mac) rather than varjo's. Still unverified on botPC (#11 follow-up): the arm-ahead flow from a second Mac (V3), after reboot (V7), and server mode under launchd.
+- Credentials: the `--bg --resume --remote-control` half runs with the `claude auth login` credential (RC requires it), so `CLAUDE_CODE_OAUTH_TOKEN` must not be in its environment. The token is injected only into headless `-p` children. `ANTHROPIC_API_KEY` is stripped from every child environment; `--bare` is never passed.
+- Safety flags (Phase 1, D6): `--permission-mode dontAsk`, allowlist `Read`, `Grep`, `Glob`, `Bash(gh pr view *)`, `Bash(gh pr diff *)`, `Bash(git log *)`, `Bash(git diff *)`; `--permission-mode` is passed explicitly on both the `-p` command and the `--bg --resume` command (a `--bg` session otherwise inherits the machine default, which was auto and ran without prompts); `--max-turns`; wall-clock timeout; default `--model sonnet --effort low`, overridable per repo. Phase 2 fix runs: `--permission-mode acceptEdits` inside the worktree; pushes stay human-approved.
 - Failure handling: each invocation is recorded in `runs`. Results are classified as ok / limit (guard, 4.6) / auth (alert, stop) / transient (bounded retry: at most 3, at least 1 min apart) / unknown (inspect transcript for `isApiErrorMessage`, max-plan.md §4). A missing `structured_output` counts as failure. Worktree-resume refusals (`worktree_resume_refused`, `worktree_unverified`, claude-code.md §5) mark the session `failed` for human attention.
 
 ### 4.4 Worktree manager
@@ -99,7 +103,7 @@ interface SessionLauncher {
 
 ### 4.5 Notifier
 
-- Interface: `Notifier { send(notification): Promise<void> }`. Content: PR title/number/URL, reviewer, severity, findings summary, files to change, proposed approach, open questions (requirements §3.4), plus the access target (M1 URL or M2 command). Output is truncated and rendered as plain text.
+- Interface: `Notifier { send(notification): Promise<void> }`. Content: PR title/number/URL, reviewer, severity, findings summary, files to change, proposed approach, open questions (requirements §3.4), plus the access target (the `rc_url` from `claude logs`). Output is truncated and rendered as plain text.
 - Dedup via `notifications.dedup_key` (for example `review:<session>:<event_id>`, `limit:<window>`). Channel adapters (Discord, ntfy, macOS-over-SSH, email) depend on O2. Failure handling: send failures are retried next cycle; a failed notification never re-runs Claude.
 
 ### 4.6 Usage-limit guard
@@ -112,9 +116,9 @@ interface SessionLauncher {
 
 ### 4.7 launchd supervisor and reboot recovery
 
-- `com.varjo.poll`: `StartInterval` job running `varjo poll`. `com.varjo.recover`: `RunAtLoad` job that waits for network, runs `claude agents` (starts the supervisor) then `claude respawn --all`, reconciles `sessions` against `claude agents --json`, and for sessions it cannot restore marks them `stopped` so the next event respawns or re-launches them. Unconfirmed: that this restores sessions after reboot (claude-code.md §18.7), and `agents --json` stability.
+- `com.varjo.poll`: `StartInterval` job running `varjo poll`. `com.varjo.recover`: `RunAtLoad` job that waits for network, runs `claude agents` (starts the supervisor), reconciles `sessions` against `claude agents --json`, and runs `claude respawn <id>` per session (or `claude respawn --all`); for sessions it cannot restore it marks them `stopped` so the next event respawns or re-launches them. `claude respawn <id>` keeps session id and URL; it restored both test sessions after the background daemon died once during #11. Unconfirmed: that this restores sessions after a reboot (claude-code.md §18.7; #11 follow-up), and `agents --json` stability.
 - Sleep/lid handling and keeping botPC awake are validated in #7; not designed here. Expired logins stop `--bg` sessions and RC (claude-code.md §10, §12), so `varjo status` reports login health and the poller alerts on auth failures.
-- M2 tmux sessions are not restored on reboot; they are on demand by design.
+- RC-exposed bg sessions are restored by `claude respawn`; reboot restoration itself is still unverified (#11 follow-up). A session that cannot be restored is re-armed on demand by the next event or `varjo open <pr>`.
 
 ### 4.8 Memory sync script
 
@@ -128,7 +132,7 @@ interface SessionLauncher {
 
 ### 4.10 Cleanup (`varjo cleanup`)
 
-- Trigger: PR seen merged/closed, plus a grace period (configurable) so the transcript stays available. Steps: `claude stop <id>` if running; `claude rm <id>` for `--bg` sessions (refuses on unpushed commits, keeps dirty worktrees); `git worktree remove` (after `git worktree unlock` if locked) for `-p`-created and VarjoManaged worktrees; `claude purge <worktree path> --dry-run` then `-y` only for worktree paths, never the main checkout (whether purge touches shared memory is unconfirmed).
+- Trigger: PR seen merged/closed, plus a grace period (configurable) so the transcript stays available. Steps: `claude stop <id>` if running; `claude rm <id>` for `--bg` sessions (refuses on unpushed commits and on uncommitted changes; never run it on a session whose worktree is shared with another live session, because it deletes that worktree); `git worktree remove` (after `git worktree unlock` if locked) for `-p`-created and VarjoManaged worktrees; `claude purge <worktree path> --dry-run` then `-y` only for worktree paths, never the main checkout (whether purge touches shared memory is unconfirmed).
 - Raise `cleanupPeriodDays` on botPC so transcripts of long-lived PRs survive (claude-code.md §13). Failure handling: anything refused (unpushed, dirty) is reported, not forced.
 
 ## 5. Data model
@@ -163,8 +167,8 @@ CREATE TABLE sessions (
   id INTEGER PRIMARY KEY,
   pr_id INTEGER NOT NULL REFERENCES prs(id),
   claude_session_id TEXT NOT NULL UNIQUE,  -- UUID passed via --session-id
-  launch_mode TEXT NOT NULL CHECK (launch_mode IN ('M1','M2')),
-  bg_id TEXT,                              -- M1: id printed by claude --bg
+  launch_mode TEXT NOT NULL CHECK (launch_mode IN ('M2')),  -- M1 rejected by #11; column kept for future modes
+  bg_id TEXT,                              -- id printed by `claude --bg --resume`; read sessionId/state from `claude agents --json`
   rc_url TEXT,                             -- claude.ai/code/<id> when known
   worktree_path TEXT, worktree_owner TEXT CHECK (worktree_owner IN ('claude','varjo')),
   branch TEXT, head_sha TEXT,              -- commit the session last saw
@@ -235,20 +239,20 @@ CREATE TABLE limit_state (                 -- single row: limits are per account
 2. The GitHub adapter inserts new review/comment events; duplicates are rejected by the unique key.
 3. The handler groups new events by PR, upserts `prs`, and claims the session lease (creating `sessions` with a fresh UUID if none exists).
 4. The worktree manager ensures the worktree at the PR head.
-5. The launcher starts the session: M1 `--bg --remote-control ...`, or M2 headless `-p` with `--json-schema`. Data is passed as delimited input.
+5. The launcher runs the headless `-p --session-id <uuid>` summary with `--json-schema` (data passed as delimited input), then arms ahead with `claude --bg --resume <uuid> --remote-control --permission-mode <mode> -n pr-<n>` and reads the URL from `claude logs <bg-id>`.
 6. The result is recorded in `runs`; events are marked `processed`; `sessions.state` becomes `awaiting_user`.
-7. The notifier sends the summary with the access target; `notifications.dedup_key` prevents duplicates.
+7. The notifier sends the summary with the `rc_url`; `notifications.dedup_key` prevents duplicates.
 
 **(b) Follow-up review on the same PR**
 1. The poller finds new events for a PR with an open session (unique index guarantees one).
 2. The worktree manager refreshes the tip if `head_sha` changed.
-3. M2: `claude -p --resume <uuid> ...`; M1: `claude --bg --resume <uuid> ...`. If the session is still live in another process the launch is refused or yields a copy; varjo then waits for the lease or defers to the next cycle rather than forking.
+3. `claude stop <bg-id>`, then `claude -p --resume <uuid> ...`, then `claude respawn <bg-id>` (same session id and URL). If the session is still live in another process, or the bg entry is stopped but retained, do not call `--bg --resume` again (it starts a copy); varjo waits for the lease or defers to the next cycle rather than forking.
 4. `last_event_id`, `last_run_at` and the run are recorded; the notifier sends the new summary.
 
 **(c) User continues the session from the phone**
-- M1: the notification link opens `claude.ai/code/<id>` in the Claude app (or browser, or Desktop's session list). The session is already RC-connected; the user sends instructions and answers permission prompts. RC push notifications cover "Claude finished / needs a decision".
-- M2: the notification includes the summary and the command `varjo open <pr>`; `varjo open` runs `claude --resume <uuid> --remote-control` in tmux on botPC, after which the session appears in the Code tab like M1. Gap: a phone cannot run `varjo open` without an SSH client over a private path. Options: an SSH app on the phone, or an "arm ahead" setting that starts the tmux RC session right after the summary (an idle interactive session). Pick after #11/#12.
-- Both: the user must not resume the same session on two machines at once (auto-memory.md). Phase 2 pushes require human approval in the RC prompt.
+- The notification carries the summary and the `claude.ai/code/session_01...` URL (arm-ahead, section 4.3). It opens in the Claude app (or browser, or Desktop's session list) with the headless history visible; the session is already RC-connected and held by `--bg`. The user sends instructions and answers permission prompts; RC push notifications cover "Claude finished / needs a decision". The phone never needs SSH.
+- `varjo open <pr>` is an optional convenience on botPC/mainPC: it prints or opens the stored `rc_url`, or runs `claude respawn <bg-id>` first if the bg entry is stopped. Phone-initiated work that no event triggered is Phase 4 (server mode).
+- The user must not resume the same session on two machines at once (auto-memory.md). Phase 2 pushes require human approval in the RC prompt.
 
 **(d) Usage limit hit**
 1. A run returns `is_error`, `api_error`, 429, the limit text, or `rate_limit_event` rejected.
@@ -259,19 +263,19 @@ CREATE TABLE limit_state (                 -- single row: limits are per account
 
 **(e) botPC reboot**
 1. launchd starts `com.varjo.recover` at load (and `com.varjo.poll` on schedule).
-2. Recovery waits for network, runs `claude agents` to start the supervisor, then `claude respawn --all`.
+2. Recovery waits for network, runs `claude agents` to start the supervisor, then `claude respawn <id>` per session (or `--all`; reboot behavior unverified).
 3. It reconciles `sessions` with `claude agents --json`: restored sessions go back to their prior state; unrestored ones become `stopped`; expired leases are cleared.
-4. A "botPC restarted" notification is sent. In-flight runs found without `finished_at` are marked failed and their events requeued (idempotent). M2 tmux sessions are not restored.
+4. A "botPC restarted" notification is sent. In-flight runs found without `finished_at` are marked failed and their events requeued (idempotent). Sessions that respawn cannot restore are re-armed by the next event.
 
 **(f) PR merged/closed, cleanup**
 1. The poller sees `state` change to `merged`/`closed`; `prs.closed_at` is set; the session moves to `closed` after the grace period.
-2. `varjo cleanup` stops a running session, runs `claude rm <id>` (M1) and `git worktree remove` for worktrees `claude rm` will not touch.
-3. Refusals (unpushed commits, dirty tree) are reported via notification and left in place.
+2. `varjo cleanup` stops a running session, runs `claude rm <id>` (unless the worktree is shared with another live session) and `git worktree remove` for worktrees `claude rm` will not touch.
+3. Refusals (unpushed commits, uncommitted changes) are reported via notification and left in place.
 4. Optionally `claude purge <worktree path>` for the session's own project key; memory files are never touched by varjo.
 
 ## 7. Phase mapping
 
-Phase 1: 4.1-4.7 (M1 or M2), cleanup minimal. Phase 2: `acceptEdits` runs, approvals through RC. Phase 3: 4.8, 4.9. Phase 4: phone-initiated tasks (RC server mode `--spawn worktree` is a candidate, claude-code.md §8), Jira adapter.
+Phase 1: 4.1-4.7 (M2 + arm-ahead), cleanup minimal. Phase 2: `acceptEdits` runs, approvals through RC. Phase 3: 4.8, 4.9. Phase 4: phone-initiated tasks (RC server mode `claude remote-control --spawn worktree` is the candidate; confirmed present on 2.1.306 and working detached with nohup and no TTY, but `--session-id` only reattaches server-mode-created `session_01...` ids, so it is not a hand-back path for headless sessions; claude-code.md §8, #11), Jira adapter.
 
 ## 8. Security model
 
@@ -328,8 +332,8 @@ Recommendation: default to `ClaudeManaged` if Phase 0 shows a second `--worktree
 - #8: dedicated login on botPC works; `setup-token` + `CLAUDE_CODE_OAUTH_TOKEN` works in launchd with `ANTHROPIC_API_KEY` unset and no `--bare` (claude-code.md §18.8); `claude auth status` output shape for the login assertion; the two credentials do not clobber each other (max-plan.md open questions).
 - #9: Desktop SSH fallback connects over the private path; sign-in expiry when mainPC sleeps.
 - #10: `claude -p --resume` keeps context across cwds (§18.2); exit codes and JSON for usage limit, expired login, bad token, `--max-turns` (§18.3); `rate_limit_event` in plain `json` mode; time zone of "resets".
-- #11 (top priority): decides M1 vs M2. Does `--bg --remote-control` work; how to read the claude.ai/code URL; does `--resume <id> --remote-control` re-attach a `-p` session; is a `--bg` session visible via RC (claude-code.md §18.6); does Desktop on a second Mac list it.
-- #12: phone drives an RC session (messages, permission prompts, push); resolves the M2 phone gap in flow (c).
+- #11 (resolved 2026-11-02, Pass on Claude Code 2.1.306): M2 + arm-ahead selected (`-p --session-id`, then `--bg --resume --remote-control`; URL from `claude logs`; `claude respawn` keeps id and URL). Remaining on botPC: V3 from a second Mac, V7 after reboot (including whether `claude respawn --all` restores sessions), server mode under launchd and the documented 10-minute outage exit.
+- #12: phone drives an RC session (messages, permission prompts, push); the arm-ahead URL in flow (c) already removes the need for SSH.
 - #13: Dispatch confirmation only (out of scope by decision).
 - #14: memory sync viability: identical-path keys, `autoMemoryDirectory` per-repo values, symlink behavior, external edits during a live session, sync direction; whether `claude purge` of a worktree path leaves memory intact.
 - #15 (plus worktree reuse): CLAUDE.md and rules in worktrees; second `--worktree "#<n>"` run reuses the worktree; `claude rm` on `-p` worktrees; pushing fixes from a `#<n>` worktree (decides O3).
@@ -344,7 +348,7 @@ varjo/
   src/
     adapters/github/   # EventSource: gh/API polling, normalization, PR state
     store/             # SQLite schema, migrations, leases, dedup queries
-    launcher/          # SessionLauncher, BgRcLauncher (M1), HeadlessTmuxLauncher (M2)
+    launcher/          # SessionLauncher, HeadlessBgLauncher (M2 + arm-ahead)
     worktree/          # ClaudeManaged and VarjoManaged strategies
     notifier/          # Notifier interface, discord/, ntfy/, ...
     limits/            # usage-limit detection, reset parsing, blocked_until

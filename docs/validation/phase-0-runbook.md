@@ -15,11 +15,13 @@ Shared helper, create once on botPC as `~/varjo-phase0/headless.sh` (`chmod +x`)
 ```sh
 #!/bin/sh
 # usage: headless.sh --session-id|--resume <uuid> "<prompt>" [extra claude flags]
+# The prompt comes before the flags: variadic flags such as --allowedTools swallow a trailing positional prompt.
+# stdin is /dev/null to skip the 3 s stdin wait.
 mode=$1; id=$2; prompt=$3; shift 3
-exec claude -p "$mode" "$id" --output-format json \
+exec claude -p "$mode" "$id" "$prompt" --output-format json \
   --permission-mode dontAsk --max-turns 15 --model sonnet --effort low \
   --allowedTools "Read,Grep,Glob,Bash(gh pr view *),Bash(gh pr diff *),Bash(git log *),Bash(git diff *)" \
-  "$@" "$prompt"
+  "$@" < /dev/null
 ```
 
 ## Prerequisites
@@ -193,6 +195,8 @@ Screenshots:
 
 ## #11 CLI-created sessions viewable and resumable from mainPC and phone (top priority)
 
+**Result (2026-11-02):** Pass, M2 + arm-ahead selected; see issue #11 comment. Remaining on botPC: V3 second Mac, V7 reboot, server mode under launchd / 10-minute outage.
+
 **Goal:** decide which launch mode (M1 or M2) makes a session created on botPC visible and controllable from phone, browser and Claude Desktop.
 
 **Setup:** #8 and #10 done. In the shell used for M1/M2, `unset ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN` (the `setup-token` token cannot establish RC and overrides the login). Run `claude remote-control` once by hand to answer the first-run y/n prompt, then Ctrl+C. Pick an open PR `<pr-number>` in a scratch repo at `<repo-path>`. Prompt used: `"Read the PR diff and summarize it in 5 bullets, then wait."`
@@ -201,7 +205,7 @@ Screenshots:
 V1 visible in the Claude app Code tab (phone) | V2 visible at claude.ai/code in a browser on mainPC | V3 visible in Claude Desktop on mainPC | V4 follow-up message works and context is intact | V5 permission prompt can be approved from phone (ask: "Create PROBE.txt containing the date") | V6 survives mainPC sleep (sleep 10 min, wake, then V4 from phone only) | V7 after `claude stop <id>` and after botPC reboot.
 
 **M1: `--bg` interactive session with RC on**
-1. `cd <repo-path>; U1=$(uuidgen | tr 'A-Z' 'a-z'); claude --bg --remote-control --session-id $U1 --worktree "#<pr-number>" "<prompt>"`. Record the printed short ID and whether a `claude.ai/code/<id>` URL is printed (expected). If a flag combination is rejected, record the exact error and retry dropping one flag at a time (note which).
+1. `cd <repo-path>; U1=$(uuidgen | tr 'A-Z' 'a-z'); claude --bg --remote-control --session-id $U1 --worktree "#<pr-number>" "<prompt>"`. Record the printed short ID and whether a `claude.ai/code/<id>` URL is printed (expected). If a flag combination is rejected, record the exact error and retry dropping one flag at a time (note which). Note (2.1.306): `--bg` ignores `--session-id` ("--bg manages the session id; ignoring --session-id"); read the real UUID and state from `claude agents --json` (`id`, `sessionId`, `cwd`, `state`, `status`, `name`), and the claude.ai URL only from `claude logs <id>` (never on the launch stdout).
 2. `claude agents`, `claude logs <short-id>`. Run V1 to V6. Record the URL; tap it on the phone and open it on mainPC (can it go in a notification?).
 3. V7: `claude stop <short-id>`; check the session's state in the app/browser; `claude attach <short-id>` and `claude --resume $U1 --remote-control`; does it re-attach to the same claude.ai session or create a new one? Then reboot botPC (log in if needed): `claude agents`, `claude respawn <short-id>`; does RC reconnect?
 4. With the session running, `claude --resume $U1` on botPC: record the refusal/copy behaviour (do not type into both).
@@ -209,15 +213,15 @@ V1 visible in the Claude app Code tab (phone) | V2 visible at claude.ai/code in 
 **M2: headless first, RC on demand**
 1. `U2=$(uuidgen | tr 'A-Z' 'a-z'); ~/varjo-phase0/headless.sh --session-id $U2 "<prompt>" --worktree "#<pr-number>" | tee m2.json`. Confirm `session_id` equals `$U2` and a summary comes back.
 2. Check V1 to V3 now (expected: not listed; headless RC is unconfirmed and probably unsupported).
-3. Expose on demand: `tmux new -s varjo-<pr-number>`; inside, `cd <repo-path>` (the worktree) and `claude --resume $U2 --remote-control`. Record the URL and whether the earlier history is present. Run V1 to V6.
-4. V7: `claude stop` does not apply (tmux process): Ctrl+C the process, check the UI shows offline, rerun `claude --resume $U2 --remote-control`, check same-session re-attach. Kill the tmux server and reboot botPC; record what survives.
-5. Hand back: exit the interactive process, then `~/varjo-phase0/headless.sh --resume $U2 "Reply with the PR title"`; confirm the transcript stays continuous.
+3. Arm ahead from the worktree: `cd <repo-path>` (the worktree), then `claude --bg --resume $U2 --remote-control --permission-mode dontAsk -n <name>` (no tmux; `--bg` holds the process). Read the bg id from `claude agents --json`, then poll `claude logs <bg-id>` for the `https://claude.ai/code/session_01...` URL. Record the URL and whether the earlier headless history is present. Run V1 to V6. Pitfall: if a `--bg` entry already exists for `$U2` (even stopped), this starts a copy with a new session id; use `claude respawn <bg-id>` instead. Pass `--permission-mode` explicitly: a `--bg` session otherwise runs in the machine default mode (auto here) without prompts.
+4. V7: `claude stop <bg-id>`, check the UI shows offline, run `~/varjo-phase0/headless.sh --resume $U2 "Reply with the PR title"`, then `claude respawn <bg-id>`; check same session id and same URL. Then reboot botPC and record whether `claude agents` / `claude respawn <bg-id>` (and `claude respawn --all`) restore the session. Pitfall: put the prompt before variadic flags such as `--allowedTools` (they swallow a trailing positional prompt) or pass it on stdin with `< /dev/null`.
+5. Hand back: a phone-typed turn is persisted in the same local `.jsonl`; confirm `~/varjo-phase0/headless.sh --resume $U2 "What did I last ask from the phone?"` (after `claude stop <bg-id>`) sees it and the transcript stays continuous.
 
 **Server mode (after M1/M2)**
-1. In tmux: `claude remote-control --name varjo-phase0 --spawn worktree` (docs list `--spawn` and `--capacity`; they are absent from the local `claude remote-control --help` on 2.1.306, so record that; note that the same help text says `--session-id` "cannot be used with spawn flags", so spawn flags exist but are undocumented in this build). Start a session from the phone; reattach later with `claude remote-control --session-id <uuid>`.
+1. Detached: `nohup claude remote-control --name varjo-phase0 --spawn worktree --capacity 4 < /dev/null > ~/varjo-phase0/rc.log 2>&1 &`. On 2.1.306 the help lists `--spawn same-dir|worktree|session`, `--capacity N`, `--session-id`, `--permission-mode`, `-c/--continue`, `--[no-]create-session-in-dir` and `--name`; it prints `https://claude.ai/code?environment=env_...` and pre-creates a session in cwd that is visible on the phone. Pass `--permission-mode` explicitly. `--session-id` takes the `session_01...` id of a session created through server mode (a uuid gives "Could not reach the server to look up session"; a `--bg` RC session id gives "has no environment_id"), and cannot be used with spawn flags. Start a session from the phone; reattach later with `claude remote-control --session-id <session_01...>`.
 2. Run it under launchd (`KeepAlive`, `RunAtLoad`, log to `~/varjo-phase0/rc.log`); confirm the first-run y/n prompt does not hang the job once it was answered by hand. Disconnect Wi-Fi 12 minutes: server mode should exit after about 10 minutes (documented); confirm launchd restarts it.
 
-**Expected:** M1 prints a `claude.ai/code/<id>` URL and shows V1 to V4 on phone and browser. M2 headless is not listed until the `--resume --remote-control` step. Whether Desktop on mainPC lists RC sessions from botPC is unconfirmed.
+**Expected (as observed on 2.1.306):** `--bg` prints no URL on stdout (it appears only in `claude logs <id>`). M2 headless is not listed until the `--bg --resume --remote-control` step, after which V1 to V4 work on phone and browser. Whether Desktop on a second Mac lists RC sessions from botPC (V3) is still unconfirmed.
 
 **Pass:** one mode passes V1 to V6 on phone and in mainPC Desktop (browser acceptable for Desktop only if Desktop fails and is noted). **Partial:** visible and drivable only from phone/browser, or resumable only by ID. **Fail:** nothing is visible without SSH. A fail needs a **user decision** (requirements §4.3); do not propose a custom UI before it.
 
@@ -393,5 +397,5 @@ Screenshots:
 ## After Phase 0
 
 - Collect the filled Results from #7 to #15. They feed `docs/design/architecture.md` (#5): auth model (`setup-token` for launchd, own login for RC), repo path convention, limit handling (#8 table), session/PR mapping (#15), memory sync unit (#14), notification contents (#11 URL format).
-- Decide whether Phase 1 proceeds with M1 (`--bg --remote-control` interactive sessions) or M2 (headless, expose on demand in tmux), or server mode, using the #11 table. If #11 fails, escalate to the user (requirements §4.3).
+- Phase 1 launch mode is settled by #11: M2 + arm-ahead (headless `-p --session-id`, then `claude --bg --resume --remote-control`). Server mode is the Phase 4 candidate. Re-check the remaining botPC items (V3 second Mac, V7 reboot, server mode under launchd / 10-minute outage). If any invalidates M2, escalate to the user (requirements §4.3).
 - Update `docs/setup/botpc.md` (#7), `docs/setup/remote-access.md` (#9) and `docs/design/worktrees.md` (#15) as their pass criteria require, and record the #13 "No" in `docs/research/remote-access.md`.
