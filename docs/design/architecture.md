@@ -135,6 +135,14 @@ interface SessionLauncher {
 - Trigger: PR seen merged/closed, plus a grace period (configurable) so the transcript stays available. Steps: `claude stop <id>` if running; `claude rm <id>` for `--bg` sessions (refuses on unpushed commits and on uncommitted changes; never run it on a session whose worktree is shared with another live session, because it deletes that worktree); `git worktree remove` (after `git worktree unlock` if locked) for `-p`-created and VarjoManaged worktrees; `claude purge <worktree path> --dry-run` then `-y` only for worktree paths, never the main checkout (whether purge touches shared memory is unconfirmed).
 - Raise `cleanupPeriodDays` on botPC so transcripts of long-lived PRs survive (claude-code.md §13). Failure handling: anything refused (unpushed, dirty) is reported, not forced.
 
+### 4.11 Power manager
+
+- Requirement: botPC must stay awake only while varjo runs. `varjo start` turns sleep prevention on; `varjo stop` (and the launchd job's exit path) restores the machine's previous settings, not macOS defaults. Validated on hardware by #7.
+- Mechanism: on start, snapshot `pmset -g custom` values (`sleep`, `disksleep`, `displaysleep` for AC and battery, plus `SleepDisabled`) to `~/.varjo/power-state.json`, then run `pmset -a sleep 0 disksleep 0 displaysleep 0` and `pmset -a disablesleep 1`. On stop, write the snapshot back and delete it. Idempotent: a present snapshot means "already on" and is never overwritten. `varjo status` reports the current state.
+- Why `pmset` and not only `caffeinate`: a `caffeinate -imsu` child prevents idle sleep while the lid is open, but closing the lid is a forced sleep that only `disablesleep 1` (root) overrides on a MacBook without an external display. varjo holds the `caffeinate` child as a belt-and-braces measure and uses `pmset` for the lid-closed case.
+- Privilege: `pmset` needs root, so the setup script installs `/etc/sudoers.d/varjo` allowing the varjo user to run `/usr/bin/pmset` with the fixed argument sets above and nothing else, `NOPASSWD`; varjo calls `sudo -n pmset ...` and treats a failure as "sleep prevention unavailable" (alert, keep running). The restore commands take values from the snapshot, so the sudoers wildcards are limited to the `-c`/`-b` restore lines; a later hardening option is a tiny root helper that only accepts the snapshot file.
+- Prototype used during Phase 0: `~/varjo-phase0/awake.sh on|off|status` with the matching sudoers rule (`~/varjo-phase0/sudoers-varjo`), to be ported into `varjo start|stop`.
+
 ## 5. Data model
 
 Timestamps are ISO 8601 UTC text. The `sessions` table holds the §4.2 fields.
@@ -275,7 +283,7 @@ CREATE TABLE limit_state (                 -- single row: limits are per account
 
 ## 7. Phase mapping
 
-Phase 1: 4.1-4.7 (M2 + arm-ahead), cleanup minimal. Phase 2: `acceptEdits` runs, approvals through RC. Phase 3: 4.8, 4.9. Phase 4: phone-initiated tasks (RC server mode `claude remote-control --spawn worktree` is the candidate; confirmed present on 2.1.306 and working detached with nohup and no TTY, but `--session-id` only reattaches server-mode-created `session_01...` ids, so it is not a hand-back path for headless sessions; claude-code.md §8, #11), Jira adapter.
+Phase 1: 4.1-4.7, 4.11 (M2 + arm-ahead), cleanup minimal. Phase 2: `acceptEdits` runs, approvals through RC. Phase 3: 4.8, 4.9. Phase 4: phone-initiated tasks (RC server mode `claude remote-control --spawn worktree` is the candidate; confirmed present on 2.1.306 and working detached with nohup and no TTY, but `--session-id` only reattaches server-mode-created `session_01...` ids, so it is not a hand-back path for headless sessions; claude-code.md §8, #11), Jira adapter.
 
 ## 8. Security model
 
@@ -293,6 +301,7 @@ Phase 1: 4.1-4.7 (M2 + arm-ahead), cleanup minimal. Phase 2: `acceptEdits` runs,
 | Traceability (§10) | `runs` and `notifications` tables, `claude logs`, per-run `log_path` |
 | What is sent to Anthropic (§6) | Prompts, file contents and command output read by tools, PR diffs and review text, and, while RC is connected, the session transcript (stored on Anthropic servers, retention per its data-usage policy). Inference is always in Anthropic's cloud (requirements §6). Not available under ZDR/HIPAA organizations |
 | Credential isolation | `claude auth login` credential used for RC/`--bg`; `setup-token` token only in headless child env (never plist-global, never logged); both single-user, no sharing (max-plan.md §2) |
+| Root privilege | Only `pmset` with fixed argument sets via `/etc/sudoers.d/varjo` (4.11); no other sudo; varjo never runs as root |
 
 ## 9. Open decisions
 
