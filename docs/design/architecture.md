@@ -1,72 +1,84 @@
 # varjo architecture: coverage map and minimal components
 
-Status: Draft, pending Phase 0 results; last updated 2026-11-01.
+Status: Draft, revised for T3 Code on 2026-11-23 (#30); pending Phase 0 round 2.
 
 Spec: [docs/requirements.md](../requirements.md) (unchanged; corrections are listed below). Research inputs: `docs/research/claude-code.md`, `remote-access.md`, `max-plan.md`, `auto-memory.md`.
 
+T3 Code inputs (repo `pingdotgg/t3code`, branch `main`): `docs/user/providers-claude.md`, `docs/user/faq.md`, `docs/user/remote-access.md`, `docs/user/background-service.md`, `docs/user/mobile-notifications.md`, `docs/user/permission-modes.md`, `docs/user/outside-agents.md`, `docs/user/source-control.md`, `docs/user/managed-policy.md`, `docs/internals/overview.md`, `docs/internals/t3-connect.md`, `apps/server/src/scheduledTasks/*`, `packages/contracts/src/scheduledTask.ts`. Scheduled tasks and webhooks have no user-facing doc page yet; their semantics here come from source and release notes v0.1.7-v0.1.10.
+
 ## 1. Summary
 
-- varjo is a thin orchestrator on botPC. It detects GitHub PR review events by polling, keeps state in SQLite, runs one Claude Code session per PR through the `claude` CLI (never the Agent SDK), and notifies the user.
-- Claude Code itself provides execution, sessions, worktrees, hooks, headless mode, background sessions, Remote Control (RC), auth tokens and cleanup commands. varjo reuses all of them.
-- Users reach botPC sessions through RC (claude.ai/code, Claude Desktop, phone). Desktop-over-SSH is an interactive fallback only. Dispatch and cloud sessions/routines are out of scope.
-- varjo builds only: the poller, event store with dedup, session launcher, worktree manager, notifier, usage-limit guard, launchd supervision with reboot recovery, a memory sync script, a PR-handoff hook, and cleanup.
-- Implementation: a single TypeScript/Node CLI `varjo` (`poll`, `status`, `open <pr>`, `cleanup`) plus SQLite. Shell is used only for launchd plists and the hook.
-- Three decisions remain open for the user (section 9): handoff storage, notification channel, worktree ownership.
+- T3 Code (t3.codes, MIT, v0.1.10 released 2026-11-17, pre-1.0) is the runtime, UI and remote layer on botPC. varjo is reduced to the GitHub event adapter plus glue (#30).
+- T3 Code owns: Claude execution (Agent SDK `@anthropic-ai/claude-agent-sdk`, reusing the `claude auth login` subscription credential), thread persistence and native resume, per-thread worktrees, permission modes, remote access (T3 Connect, LAN pairing, Tailscale, SSH), clients (desktop, web, iOS, Android), push notifications, the always-on service (`t3 up`), scheduled tasks and webhook ingestion, and an MCP server through which outside agents start and read threads.
+- varjo builds only: the GitHub poller, the event store with dedup, the thread launcher (an MCP client of T3 Code), the review-summary schema and prompt, the usage-limit guard, a memory sync script, a PR-handoff step (pending #34), cleanup policy, the power manager, and the launchd jobs `com.varjo.poll` and `com.varjo.memsync`.
+- varjo drops: the `claude --bg` / `--remote-control` arm-ahead launcher, `claude logs` URL scraping, `claude respawn`, the `com.varjo.recover` job, notifier channel adapters as a required component (T3 push replaces them; a Discord/ntfy adapter stays optional), and `setup-token` / `CLAUDE_CODE_OAUTH_TOKEN` handling (needed only for the CLI fallback).
+- Users reach botPC threads from the T3 Code desktop, web or mobile app. The `SessionLauncher` interface stays with `T3McpLauncher` as its only implementation; the former CLI launcher (M2 + arm-ahead, #11) is recorded as the fallback design and is built only if #32 or #34 fails.
+- Implementation: a single TypeScript/Node CLI `varjo` (`poll`, `status`, `open <pr>`, `cleanup`) plus SQLite. Shell is used only for launchd plists and scripts.
+- Five decisions remain open for the user (section 9): handoff storage, notification channel, worktree ownership, T3 Connect vs Tailscale-only, trigger route.
 
 ## 2. Corrections to the requirements document
 
-| Requirements section | Assumption | What the research found | Consequence |
-|---|---|---|---|
-| §4.3, §9 Phase 0 | CLI-created sessions on botPC can show up in Claude Desktop on mainPC | Desktop over SSH lists only sessions Desktop starts; no session-ID deep link; `claude --desktop --resume` is local-only (remote-access.md §A). RC is the documented path to claude.ai/code, phone and Desktop (remote-access.md §B, claude-code.md §17.1) | RC is primary (D1). Desktop SSH is an interactive fallback. Experiment #11 passed and selected M2 + arm-ahead (headless `-p` summary, then `--bg --resume --remote-control`; section 4.3) |
-| §2.3, §9 Phase 0 | Dispatch may run tasks in botPC repos | Dispatch cannot target a machine or repo; it needs Desktop running on the paired computer; limited beta, closed to new users (remote-access.md §C) | Dispatch is out of scope; #13 is confirmation only |
-| §8 | Agent SDK / Dispatch are options for AI execution and phone control | Anthropic docs steer SDK users to API keys and bar claude.ai login for third-party products; non-bare `claude -p` uses the subscription (claude-code.md §7, max-plan.md §2) | Drive the CLI (`claude -p`, `--bg`, `--worktree`) from launchd-managed code; no `@anthropic-ai/claude-agent-sdk` |
-| §5.4 | A Skill/Hook can fire "at PR creation" | No commit/push/PR hook event exists (claude-code.md §3, §17.4) | `PostToolUse` hook with `if: "Bash(gh pr create *)"` (D8); unconfirmed in `-p` runs |
-| §1, §8 (Max), max-plan.md §1 | Plan tiers are "Max 5x/20x" | The 20x tier is now called Ultra; docs say "Pro, Max, Ultra" (max-plan.md §1) | Use "Max/Ultra" in docs and config; limits are per account, shared by botPC and mainPC (max-plan.md §3) |
-| §6 | Execution is local and only inference leaves the machine | While RC is connected the transcript is stored on Anthropic servers; RC is unavailable under ZDR/HIPAA (remote-access.md §B) | Security model (section 8) states this explicitly; RC use is a conscious trade-off against §6 confidentiality |
-| §2.1, §10 | botPC recovers after reboot | `--bg` sessions stop on reboot; no launchd integration is provided (claude-code.md §10) | varjo ships a launchd recovery job (flow e) |
-| §9 Phase 0 (Max auth), §6 | One login can serve CLI, RC and unattended jobs | `setup-token` tokens cannot establish RC; `CLAUDE_CODE_OAUTH_TOKEN` overrides `/login` in new sessions; `ANTHROPIC_API_KEY` always wins in `-p`; `--bare` ignores OAuth (claude-code.md §12, max-plan.md §1) | Two credentials on botPC (D2); the token env var is injected only into headless child processes, never into RC-bearing launches |
-| §5.3 | Auto Memory sharing is an open question | Memory is per repo, shared across worktrees, machine-local, keyed by absolute path (auto-memory.md) | Identical repo paths on both Macs, fallback `autoMemoryDirectory` (D3) |
-| §3.2 | Events can be detected with existing tooling | No local review-event source; Routines GitHub trigger runs in the cloud only (claude-code.md §15, §16) | varjo must build the poller |
-| §10 | "Stop gracefully at the usage limit" is straightforward | No documented exit code for limit hits in `-p`; observed behavior differs per version and is unstable (max-plan.md §4) | Detection by OR over several signals, key on `is_error`/`api_error`, not `subtype` (D7) |
-| §3.3 step 4 | A worktree is created or updated per PR | `--worktree "#<n>"` keeps the old tip for PR-reference names; `-p` runs never clean up their worktrees (claude-code.md §5) | varjo must refresh the tip itself and sweep stale worktrees |
+The first five columns are the record of the `claude` CLI round and are kept as written. The last column states what #30 (T3 Code) did to each row.
+
+| Requirements section | Assumption | What the research found | Consequence | Status after #30 |
+|---|---|---|---|---|
+| §4.3, §9 Phase 0 | CLI-created sessions on botPC can show up in Claude Desktop on mainPC | Desktop over SSH lists only sessions Desktop starts; no session-ID deep link; `claude --desktop --resume` is local-only (remote-access.md §A). RC is the documented path to claude.ai/code, phone and Desktop (remote-access.md §B, claude-code.md §17.1) | RC is primary (D1). Desktop SSH is an interactive fallback. Experiment #11 passed and selected M2 + arm-ahead (headless `-p` summary, then `--bg --resume --remote-control`; recorded as the CLI fallback in section 4.3) | Superseded by T3 Code (#30): the T3 Code apps are the clients; RC and Desktop SSH are not used |
+| §2.3, §9 Phase 0 | Dispatch may run tasks in botPC repos | Dispatch cannot target a machine or repo; it needs Desktop running on the paired computer; limited beta, closed to new users (remote-access.md §C) | Dispatch is out of scope; #13 is confirmation only | Unchanged (#13 closed) |
+| §8 | Agent SDK / Dispatch are options for AI execution and phone control | Anthropic docs steer SDK users to API keys and bar claude.ai login for third-party products; non-bare `claude -p` uses the subscription (claude-code.md §7, max-plan.md §2) | Drive the CLI (`claude -p`, `--bg`, `--worktree`) from launchd-managed code; no `@anthropic-ai/claude-agent-sdk` | Superseded by T3 Code (#30); terms re-check in the Agent SDK row below |
+| §5.4 | A Skill/Hook can fire "at PR creation" | No commit/push/PR hook event exists (claude-code.md §3, §17.4) | `PostToolUse` hook with `if: "Bash(gh pr create *)"` (D8); unconfirmed in `-p` runs | Re-check (#34): whether the Agent SDK session under T3 Code loads and fires the hook; fallback in section 4.9 |
+| §1, §8 (Max), max-plan.md §1 | Plan tiers are "Max 5x/20x" | The 20x tier is now called Ultra; docs say "Pro, Max, Ultra" (max-plan.md §1) | Use "Max/Ultra" in docs and config; limits are per account, shared by botPC and mainPC (max-plan.md §3) | Unchanged |
+| §6 | Execution is local and only inference leaves the machine | While RC is connected the transcript is stored on Anthropic servers; RC is unavailable under ZDR/HIPAA (remote-access.md §B) | Security model (section 8) states this explicitly; RC use is a conscious trade-off against §6 confidentiality | Superseded by T3 Code (#30): the trade-off is now the T3 Connect relay (O4, section 8); RC is not used |
+| §2.1, §10 | botPC recovers after reboot | `--bg` sessions stop on reboot; no launchd integration is provided (claude-code.md §10) | varjo ships a launchd recovery job (flow e) | Superseded by T3 Code (#30): the `t3 up` service restarts itself; varjo reconciles at poll start; no recovery job |
+| §9 Phase 0 (Max auth), §6 | One login can serve CLI, RC and unattended jobs | `setup-token` tokens cannot establish RC; `CLAUDE_CODE_OAUTH_TOKEN` overrides `/login` in new sessions; `ANTHROPIC_API_KEY` always wins in `-p`; `--bare` ignores OAuth (claude-code.md §12, max-plan.md §1) | Two credentials on botPC (D2); the token env var is injected only into headless child processes, never into RC-bearing launches | Superseded by T3 Code (#30): one `claude auth login` credential used by T3 Code; token handling kept only for the CLI fallback; re-check (#30 decision 3) |
+| §5.3 | Auto Memory sharing is an open question | Memory is per repo, shared across worktrees, machine-local, keyed by absolute path (auto-memory.md) | Identical repo paths on both Macs, fallback `autoMemoryDirectory` (D3) | Unchanged; memory key cross-check added in #34 |
+| §3.2 | Events can be detected with existing tooling | No local review-event source; Routines GitHub trigger runs in the cloud only (claude-code.md §15, §16) | varjo must build the poller | Unchanged; T3 webhooks add an optional route (O5) |
+| §10 | "Stop gracefully at the usage limit" is straightforward | No documented exit code for limit hits in `-p`; observed behavior differs per version and is unstable (max-plan.md §4) | Detection by OR over several signals, key on `is_error`/`api_error`, not `subtype` (D7) | Re-check (#8): detection moves to thread state and `t3_thread_read` output; signals pending |
+| §3.3 step 4 | A worktree is created or updated per PR | `--worktree "#<n>"` keeps the old tip for PR-reference names; `-p` runs never clean up their worktrees (claude-code.md §5) | varjo must refresh the tip itself and sweep stale worktrees | Re-check (#15): T3 workspace modes replace `--worktree`; varjo still fetches and refreshes the tip (O3) |
+| §8 (Agent SDK) | The Agent SDK is not usable with a subscription login (CLI-round finding, ToS) | T3 Code runs Claude through the Agent SDK, reusing the `claude auth login` credential; the T3 FAQ says the Max subscription works and, since v0.1.7, draws down the same 5-hour limit (faq.md, providers-claude.md) | varjo does not call the SDK itself; T3 Code does, and varjo drives T3 Code over MCP | Re-check (#30 decision 3): terms for subscription use through the SDK are re-checked before Phase 1 |
+| §4.3, §2.3 (remote access) | RC and Claude Desktop over SSH are the remote paths | T3 Code offers T3 Connect (Clerk-authenticated relay plus outbound tunnel, no inbound ports), LAN pairing, Tailscale (including Tailscale HTTPS) and SSH (remote-access.md, t3-connect.md) | RC and Desktop SSH are replaced by T3 Connect or Tailscale; the choice is O4 | Superseded by T3 Code (#30); decided by #31 |
 
 ## 3. Coverage map
 
-| Capability | Existing tool? | Build? | Notes |
+| Capability | T3 Code provides? | varjo builds? | Notes |
 |---|---|---|---|
-| Run Claude in a repo | Claude Code CLI | no | `claude -p`, `--bg` (claude-code.md §2, §10) |
-| Remote GUI (mainPC) | RC via Claude Desktop / claude.ai/code; Desktop SSH as fallback | no | Desktop lists RC sessions; cross-Mac UI path unconfirmed (remote-access.md §B; #11) |
-| Smartphone control | Remote Control (Claude app Code tab) | no | Send messages, approve prompts, push notifications (remote-access.md §B, Mobile). Dispatch out of scope |
-| PR review event detection | none | **yes** (poller) | `gh` CLI/API; no local event source exists (claude-code.md §16) |
-| Dedup + state | none | **yes** (SQLite) | GitHub review/comment IDs as keys (requirements §3.2) |
-| Worktree per PR | git; `claude --worktree "#<n>"` | thin wrapper | Ownership is open decision O3 (claude-code.md §5) |
-| PR ↔ session mapping | `--from-pr` (interactive helper only) | **yes** | `--from-pr` storage and `-p` coverage unconfirmed (claude-code.md §11) |
-| Session create/resume | `--session-id`, `--resume`, `-p --resume` | no | varjo supplies the UUID and stores it (claude-code.md §1) |
-| Headless review summary | `claude -p --json-schema` | prompt + schema only | claude-code.md §2, §14 |
-| Background per-PR worker | `--bg`, `attach`, `logs`, `stop`, `respawn`, `agents` | no (process holder for the RC half of M2) | claude-code.md §10 |
-| Notification to mainPC/phone | Stop/Notification hooks, RC push notifications | **yes** (adapter) | Channel is open decision O2; RC push covers only RC-connected sessions |
-| Usage-limit handling | none | **yes** (guard) | max-plan.md §4, "Proposed limit-handling behavior" |
-| Unattended auth | `claude auth login`, `claude setup-token` | config only | Secure token storage only (claude-code.md §12) |
-| PR handoff doc | `PostToolUse` hook, Skill | small | §5.4 template; storage is O1 (claude-code.md §3, §4) |
-| Memory sync | rsync over SSH (Git/Syncthing rejected for now) | config only | One-way, `projects/<key>/memory/` only, no `--delete` (auto-memory.md) |
-| Scheduling | launchd | config only | Poll interval and recovery jobs |
-| Reboot recovery | none for `--bg` | thin | launchd job runs `claude agents` then `claude respawn` (claude-code.md §10) |
-| Cleanup of sessions/worktrees | `claude rm`, `claude purge`, `git worktree remove`, `cleanupPeriodDays` | policy only | Which PRs are closed is varjo's job (claude-code.md §13, §16) |
-| Logs and traceability | `claude logs`, transcripts, stream-json | **yes** (runs table) | claude-code.md §16 |
-| Approval gate for pushes (Phase 2) | RC permission prompts; `--permission-prompt-tool` | no (first iteration) | Human approves through RC; custom relay deferred |
-| Jira/CI sources | none | later | Same `EventSource` interface |
+| Run Claude in a repo | Yes: Agent SDK with the `claude auth login` credential | no | providers-claude.md, faq.md |
+| Remote GUI (mainPC) | Yes: desktop app (macOS/Win/Linux), app.t3.codes | no | Reached over T3 Connect, LAN pairing, Tailscale or SSH (remote-access.md); O4 |
+| Smartphone control | Yes: iOS and Android apps | no | Send messages, answer approvals in the thread UI; #12 confirms |
+| PR review event detection | No | **yes** (poller) | `gh` CLI/API; T3 webhooks are an optional route (O5) |
+| Dedup + state | Partly: dedupe for T3's own webhook ingestion only | **yes** (SQLite) | GitHub review/comment IDs as keys (requirements §3.2) |
+| Worktree per PR | Yes: workspace modes root / new worktree / existing worktree | thin wrapper | Ownership is open decision O3; varjo fetches `pull/<n>/head` either way |
+| PR ↔ session mapping | No | **yes** | `sessions.t3_thread_id`, `t3_thread_url` |
+| Session create/resume | Yes: event-sourced thread persistence with native resume | no | varjo stores the thread id returned by `t3_thread_launch`; follow-ups are messages into the thread |
+| Headless review summary | Partly: threads run headless; no `--json-schema` equivalent is exposed | prompt + schema + validation | Prompt asks for a fenced JSON block; varjo extracts it from the final assistant message and validates it |
+| Background per-PR worker | Yes: the `t3 up` launchd service | no | background-service.md |
+| Notification to mainPC/phone | Yes: T3 push | optional adapter | Adapter only for Tailscale-only setups and for limit/reboot alerts without a thread (O2) |
+| Push notifications | Yes: finish / fail / approval / question, requires T3 Connect | no | mobile-notifications.md; O4 |
+| Usage-limit handling | No | **yes** (guard) | Detection via thread state and `t3_thread_read` output; signals pending #8 |
+| Unattended auth | Yes: picks up the `claude auth login` credential | config only | varjo's own MCP OAuth credential, 0600 on botPC |
+| MCP server | Yes: per environment at `https://<env>/mcp`, OAuth, access levels Read only / Supervised / Auto-accept edits / Auto / Full access | MCP client only | outside-agents.md; tools `t3_thread_launch`, `t3_thread_wait`, `t3_thread_read`, `t3_thread_list`, `t3_thread_search`, plus message and stop |
+| Permission modes | Yes: Supervised / Auto-accept edits / Auto / Full access; managed policy can cap | mapping only | permission-modes.md, managed-policy.md; exact read-only mapping recorded by #32 |
+| Scheduled tasks / webhooks | Yes: `fixed_time` / `once` / `interval` (min 60 s) / `webhook` with HMAC-SHA256, JSON-path filters, `{{path}}` templates, dedupe; the T3 Connect relay can hold hooks up to 24 h | no (optional adapter) | No user-facing doc yet (source and release notes); trigger route is O5, decided by #33 |
+| Source-control UI | Yes (source-control.md) | no | Not evaluated yet; no varjo dependency in Phase 1 |
+| PR handoff doc | Unconfirmed: depends on whether hooks and Skills load in the SDK session (#34) | small | §5.4 template; storage is O1; fallback in 4.9 |
+| Memory sync | No | config only | One-way, `projects/<key>/memory/` only, no `--delete` (auto-memory.md); key cross-check in #34 |
+| Scheduling | Partly: scheduled tasks exist | config only | launchd runs the poll interval and memsync; T3 interval tasks are expected unsuitable (O5) |
+| Reboot recovery | Yes: the `t3 up` service restarts itself | thin | `varjo poll` reconciles `sessions` against `t3_thread_list` at its start |
+| Cleanup of sessions/worktrees | Partly: T3 worktree cleanup setting | policy only | Which PRs are closed is varjo's job; interaction with T3's setting by #15 |
+| Logs and traceability | Yes: event-sourced thread history | **yes** (runs table) | `runs` keeps the MCP request, status and result path |
+| Approval gate for pushes (Phase 2) | Yes: approvals in T3's UI | no (first iteration) | Human approves in the thread; varjo adds no relay |
+| Jira/CI sources | No | later | Same `EventSource` interface |
 
 ## 4. Components varjo builds
 
-All components live in one Node process per invocation (`varjo poll` from launchd) except hooks and scripts. Concurrency control is a per-session lease plus one global concurrent-run slot (max-plan.md §6: single concurrent run).
+All components live in one Node process per invocation (`varjo poll` from launchd) except scripts. Concurrency control is a per-session lease plus one global concurrent-run slot (max-plan.md §6: single concurrent run).
 
 ### 4.1 Poller (GitHub adapter)
 
 - Interfaces: `EventSource { poll(since): Event[] }`, `EventHandler { handle(event): void }`. GitHub is the first `EventSource`; Jira/CI later (requirements §7).
 - Responsibility: for each enabled repo, list the user's open PRs, fetch reviews, review comments and replies newer than the stored cursor, and normalize them to `Event`. Also report PR state changes (merged/closed) for cleanup.
 - Inputs: `repos` table, GitHub auth already present for `gh` on botPC (fine-grained token or `gh auth`, scoped to PR read + contents read for Phase 1). Outputs: rows in `events`, updated `prs`.
-- Flags/commands: `gh` CLI or `gh api`; no `claude` flags.
-- Failure handling: network/HTTP errors abort the cycle without advancing the cursor; the next launchd interval retries. GitHub rate limits back off the same way. Never calls `claude`.
+- Flags/commands: `gh` CLI or `gh api`; no T3 Code calls.
+- Failure handling: network/HTTP errors abort the cycle without advancing the cursor; the next launchd interval retries. GitHub rate limits back off the same way. Never launches a thread.
 
 ### 4.2 Event store and dedup (SQLite)
 
@@ -74,7 +86,7 @@ All components live in one Node process per invocation (`varjo poll` from launch
 - Inputs: normalized events. Outputs: the work queue (events with status `new`) grouped by PR. Multiple new events on one PR in one cycle are batched into one run.
 - Failure handling: crash mid-run leaves the lease to expire (`lease_until`); events stay `queued` and are retried subject to the limit guard. Schema: section 5.
 
-### 4.3 Session launcher (one interface, one implementation)
+### 4.3 Thread launcher (`SessionLauncher`, `T3McpLauncher`)
 
 ```ts
 interface SessionLauncher {
@@ -83,57 +95,62 @@ interface SessionLauncher {
 }
 ```
 
-- Shared: varjo generates the UUID and stores it before launching; permission and model settings come from per-repo config; PR comment text is passed as delimited data (section 8).
-- **`HeadlessBgLauncher` (M2 + arm-ahead, selected by #11)**: two commands per first review, both with cwd = worktree.
-  1. Headless summary: `claude -p <prompt> --session-id <uuid> --output-format json --json-schema <schema> --permission-mode dontAsk --permission-prompts none --allowedTools <list> --max-turns <n> --model sonnet --effort low < /dev/null`. The prompt precedes the variadic flags (`--allowedTools` swallows a trailing positional prompt); stdin is `/dev/null` (or the prompt) to avoid the 3 s stdin wait.
-  2. Arm-ahead, immediately after the summary: `claude --bg --resume <uuid> --remote-control --permission-mode <mode> -n pr-<n>`. `--bg` is the process holder (no tmux). It prints the bg id (stored as `bg_id`); the URL `https://claude.ai/code/session_01...` is never on stdout, so varjo polls `claude logs <bg-id>` until the URL regex matches and stores it as `rc_url`. The real session UUID is verified from `claude agents --json` (`sessionId`, `state`).
-  3. The notification carries the structured summary plus `rc_url`, so the phone needs no SSH. The headless history is visible on claude.ai/code, phone and Desktop; turns typed on the phone land in the same local `.jsonl` and a later `-p --resume` sees them.
-  4. Automation follow-ups on a session already armed: `claude stop <bg-id>`, then `claude -p <prompt> --resume <uuid> ...`, then `claude respawn <bg-id>` (same session id and URL). Never re-run `claude --bg --resume <uuid> --remote-control` against a stopped-but-retained bg entry: it starts a copy with a new session id (the entry keeps its own saved options). `--resume ... --remote-control` keeps the UUID only when no bg entry exists for it yet.
-- M1 (`claude --bg --remote-control --session-id <uuid> --worktree ...` directly) was rejected: `--bg` ignores `--session-id` ("--bg manages the session id"), so varjo could not choose the UUID up front, and a `--bg` session runs in the machine's default permission mode (auto on the test Mac) rather than varjo's. Still unverified on botPC (#11 follow-up): the arm-ahead flow from a second Mac (V3), after reboot (V7), and server mode under launchd.
-- Credentials: the `--bg --resume --remote-control` half runs with the `claude auth login` credential (RC requires it), so `CLAUDE_CODE_OAUTH_TOKEN` must not be in its environment. The token is injected only into headless `-p` children. `ANTHROPIC_API_KEY` is stripped from every child environment; `--bare` is never passed.
-- Safety flags (Phase 1, D6): `--permission-mode dontAsk`, allowlist `Read`, `Grep`, `Glob`, `Bash(gh pr view *)`, `Bash(gh pr diff *)`, `Bash(git log *)`, `Bash(git diff *)`; `--permission-mode` is passed explicitly on both the `-p` command and the `--bg --resume` command (a `--bg` session otherwise inherits the machine default, which was auto and ran without prompts); `--max-turns`; wall-clock timeout; default `--model sonnet --effort low`, overridable per repo. Phase 2 fix runs: `--permission-mode acceptEdits` inside the worktree; pushes stay human-approved.
-- Failure handling: each invocation is recorded in `runs`. Results are classified as ok / limit (guard, 4.6) / auth (alert, stop) / transient (bounded retry: at most 3, at least 1 min apart) / unknown (inspect transcript for `isApiErrorMessage`, max-plan.md §4). A missing `structured_output` counts as failure. Worktree-resume refusals (`worktree_resume_refused`, `worktree_unverified`, claude-code.md §5) mark the session `failed` for human attention.
+- Shared: varjo stores the thread id returned by the launch before it waits; permission mode and model come from per-repo config; PR comment text is passed as delimited data (section 8).
+- **`T3McpLauncher` (the only implementation)**: an MCP client of the T3 Code environment at `https://<env>/mcp`, authenticated by OAuth.
+  1. First review: `t3_thread_launch` with the project (the repo root registered in T3 Code), workspace mode per O3, the read-only summary permission mode, the model per repo config (default Sonnet, low effort if T3 Code exposes it), and the prompt (fixed template plus review text in a delimited data block).
+  2. `t3_thread_wait` (bounded), then `t3_thread_read` to extract the structured summary: a fenced JSON block in the final assistant message, validated by varjo against the schema.
+  3. Follow-up on the same PR: send the new review as a message into the same thread (MCP message tool), then wait and read as above. Stop uses the MCP stop tool; reconciliation uses `t3_thread_list`.
+  4. varjo stores `t3_thread_id`, `t3_thread_url` and `t3_environment`. The summary is visible on the phone as the thread's last assistant turn, and T3 push notifies "finished".
+- Credentials: Claude credentials stay with T3 Code (it picks up `claude auth login`); varjo never handles them. varjo's own MCP OAuth credential is stored 0600 on botPC, never synced, approved at the lowest access level that allows `t3_thread_launch`; a thread varjo starts cannot exceed that level. `ANTHROPIC_API_KEY` is never set and usage credits stay OFF; the `t3 up` service environment is checked in #8.
+- Safety (Phase 1, D6): read-only summary mode (target: Supervised with a read-only allowlist `Read`, `Grep`, `Glob`, `Bash(gh pr view *)`, `Bash(gh pr diff *)`, `Bash(git log *)`, `Bash(git diff *)`; the exact T3 mode mapping is recorded by #32); wall-clock timeout on the bounded wait; default Sonnet at low effort, overridable per repo. Phase 2 fix runs: auto-accept edits inside the worktree; pushes stay human-approved in T3's UI. T3 managed policy can cap the maximum mode.
+- Failure handling: each launch, message and read is recorded in `runs`. Results are classified as ok / limit (guard, 4.6) / auth (alert, stop) / transient (bounded retry: at most 3, at least 1 min apart) / unknown (inspect the thread output). A missing or invalid JSON summary counts as failure. Worktree problems (4.4) mark the session `failed` for human attention.
+- **CLI fallback (not built)**: `HeadlessBgLauncher` (M2 + arm-ahead, validated by #11 on Claude Code 2.1.306): a headless `claude -p --session-id` summary, then `claude --bg --resume --remote-control`, URL from `claude logs`, restarts via `claude respawn`. Recorded in git history (commit 8bdc33d) and issue #11; built only if #32 or #34 fails.
 
 ### 4.4 Worktree manager
 
 - Responsibility: `ensure(pr) -> path`. Two strategies behind one interface, chosen by O3:
-  - `ClaudeManaged`: pass `--worktree "#<n>"`; read back the path (`.claude/worktrees/pr-<n>`). Because PR-reference names keep the old tip (claude-code.md §5), varjo must still `git fetch origin pull/<n>/head` and fast-forward the worktree when `head_sha` changes.
-  - `VarjoManaged`: `git worktree add` under a configurable root, fetch `pull/<n>/head`, run `claude` with cwd = worktree. `claude rm` leaves such worktrees alone, so varjo removes them itself.
-- Inputs: PR number, head SHA. Outputs: `worktree_path`, verified `head_sha`. Failure handling: dirty worktree is never reset; the session is marked `failed` with the reason. `.worktreeinclude` handles gitignored files such as `.env`.
+  - `T3Managed`: launch with workspace mode "new worktree"; T3 Code names the branch and picks the location. varjo must still `git fetch origin pull/<n>/head` into it and fast-forward the worktree when `head_sha` changes (the thread must be idle).
+  - `VarjoManaged`: `git worktree add` under a configurable root at `pull/<n>/head`, passed to T3 Code as workspace mode "existing worktree". varjo refreshes and removes these worktrees itself.
+- Inputs: PR number, head SHA. Outputs: `worktree_path`, verified `head_sha`. Failure handling: dirty worktree is never reset; the session is marked `failed` with the reason. Gitignored files such as `.env` are handled in #15.
 
-### 4.5 Notifier
+### 4.5 Notifications (T3 push; optional adapter)
 
-- Interface: `Notifier { send(notification): Promise<void> }`. Content: PR title/number/URL, reviewer, severity, findings summary, files to change, proposed approach, open questions (requirements §3.4), plus the access target (the `rc_url` from `claude logs`). Output is truncated and rendered as plain text.
-- Dedup via `notifications.dedup_key` (for example `review:<session>:<event_id>`, `limit:<window>`). Channel adapters (Discord, ntfy, macOS-over-SSH, email) depend on O2. Failure handling: send failures are retried next cycle; a failed notification never re-runs Claude.
+- Default: T3 push to the phone on finish / fail / approval / question (mobile-notifications.md). It requires T3 Connect (O4). varjo sends nothing for "summary ready" or "needs approval".
+- Optional: `Notifier { send(notification): Promise<void> }` with a Discord adapter first and ntfy second, opt-in for Tailscale-only setups where T3 push is unavailable and for limit/reboot alerts that have no thread. Content: PR title/number/URL, reviewer, severity, findings summary, files to change, proposed approach, open questions (requirements §3.4), plus the `t3_thread_url`. Output is truncated and rendered as plain text.
+- Dedup via `notifications.dedup_key` (for example `review:<session>:<event_id>`, `limit:<window>`). Failure handling: send failures are retried next cycle; a failed notification never re-runs Claude.
 
 ### 4.6 Usage-limit guard
 
-- Responsibility (max-plan.md "Proposed limit-handling behavior", D7): preflight check of `limit_state.blocked_until` before any `claude` spawn; classify run results; persist the block; notify once per window; send "resumed" after the first success.
-- Detection (OR): JSON `api_error == "usage_limit_reached"`; `api_error_status == 429`; `is_error` with text matching `/hit your (session|weekly|Opus|Sonnet) limit/`; stream-json `rate_limit_event` with `status == "rejected"`. `subtype` is ignored.
-- Reset: epoch `resetsAt` if present, else parse "resets 3:45pm" in the botPC time zone (unverified), plus 2-5 minutes jitter. Unparsable: backoff 30 min, 1 h, 2 h (capped at 5 h; weekly: 6 h steps).
-- Pre-emptive: stop starting jobs when five-hour utilization >= ~0.9 (from `rate_limit_event` `unifiedWindows`, undocumented fields). Never retry within a poll cycle; at most one probe per window. `CLAUDE_CODE_RETRY_WATCHDOG` is never set. Auth errors alert and stop; they are not treated as limits.
-- Credits: usage credits stay OFF so no spend is possible; the guard asserts a subscription login at start-up (`claude auth status`, output shape unconfirmed, max-plan.md §5).
+- Responsibility (max-plan.md "Proposed limit-handling behavior", D7): preflight check of `limit_state.blocked_until` before any `t3_thread_launch` or message; classify run results; persist the block; surface it once per window; note "resumed" after the first success.
+- Detection: from thread state (failed or stalled) and the limit text in `t3_thread_read` output. Signals and parsing are pending #8; the CLI-round signals (max-plan.md §4: `api_error`, 429, the limit text) are the starting hypothesis, and `subtype`-style fields are not relied on.
+- Reset: parse the reset time from the limit text in the botPC time zone (unverified), plus 2-5 minutes jitter. Unparsable: backoff 30 min, 1 h, 2 h (capped at 5 h; weekly: 6 h steps).
+- Pre-emptive: if T3 Code exposes utilization (unconfirmed), stop starting jobs at five-hour utilization >= ~0.9; otherwise this is dropped. Never retry within a poll cycle; at most one probe per window. Auth errors alert and stop; they are not treated as limits.
+- Alerts: no "limit" thread is started. The block is recorded, shown in `varjo status`, and sent through the optional adapter if configured. Usage credits stay OFF so no spend is possible.
 
-### 4.7 launchd supervisor and reboot recovery
+### 4.7 launchd jobs
 
-- `com.varjo.poll`: `StartInterval` job running `varjo poll`. `com.varjo.recover`: `RunAtLoad` job that waits for network, runs `claude agents` (starts the supervisor), reconciles `sessions` against `claude agents --json`, and runs `claude respawn <id>` per session (or `claude respawn --all`); for sessions it cannot restore it marks them `stopped` so the next event respawns or re-launches them. `claude respawn <id>` keeps session id and URL; it restored both test sessions after the background daemon died once during #11. Unconfirmed: that this restores sessions after a reboot (claude-code.md §18.7; #11 follow-up), and `agents --json` stability.
-- Sleep/lid handling and keeping botPC awake are validated in #7; not designed here. Expired logins stop `--bg` sessions and RC (claude-code.md §10, §12), so `varjo status` reports login health and the poller alerts on auth failures.
-- RC-exposed bg sessions are restored by `claude respawn`; reboot restoration itself is still unverified (#11 follow-up). A session that cannot be restored is re-armed on demand by the next event or `varjo open <pr>`.
+- `com.varjo.poll`: `StartInterval` job running `varjo poll`. `com.varjo.memsync`: timer job running `scripts/memsync.sh` (4.8). There is no recovery job: the `t3 up` service restarts itself (background-service.md).
+- Reconciliation at the start of each poll: compare `sessions` with `t3_thread_list`; threads that are missing become `stopped` and are re-launched on the next event; in-flight runs without `finished_at` are marked failed and their events requeued; expired leases are cleared.
+- Sleep/lid handling and keeping botPC awake are validated in #7; not designed here. `varjo status` reports login health and the poller alerts on auth failures seen in runs.
 
 ### 4.8 Memory sync script
 
 - `scripts/memsync.sh`: `rsync -a --update` over SSH of `~/.claude/projects/<key>/memory/` only, one direction (default mainPC to botPC, direction is a variable to confirm in #14), no `--delete`. Key per repo is computed from the absolute path; identical paths on both Macs (D3). Fallback: `autoMemoryDirectory`.
 - Nothing else under `~/.claude` or `~/.claude.json` is synced. Optional pre-sync secret scan of the memory files. Runs from launchd on a timer or manually. Failure handling: failed rsync leaves both sides unchanged; logged by `varjo status`.
+- Memory key (#34): confirm that T3 Code's Agent SDK sessions write memory under the same `projects/<key>/memory/` key (including for worktree paths) and honour `CLAUDE_CONFIG_DIR`, so the sync target is the directory T3 Code actually uses.
 
-### 4.9 Handoff hook (Phase 3)
+### 4.9 Handoff hook (Phase 3, pending #34)
 
-- `hooks/pr-handoff.sh`, registered as `PostToolUse` with `if: "Bash(gh pr create *)"` (D8). Reads the hook stdin JSON (`session_id`, `cwd`, `transcript_path`), extracts the PR URL from the tool output, records the PR to session link in SQLite, and asynchronously asks the same session for the §5.4 template (`claude -p --resume <session_id>` with a repo skill and `--json-schema`).
-- Output goes through a `HandoffStore` interface keyed by repo + PR number + head SHA; backend per O1. Unconfirmed: `if` filters firing in `-p`, hook stdin fields (claude-code.md §18.9-10). Failure handling: hook exits 0 always (never blocks PR creation); failures are logged and surfaced by `varjo status`.
+- `hooks/pr-handoff.sh`, registered as `PostToolUse` with `if: "Bash(gh pr create *)"` (D8). Reads the hook stdin JSON (`session_id`, `cwd`, `transcript_path`), extracts the PR URL from the tool output, records the PR to session link in SQLite, and asynchronously asks for the §5.4 template. Under T3 Code the request cannot use `claude -p --resume`; it goes into the originating thread as a message via MCP (thread looked up from `session_id`; mapping confirmed in #34).
+- Pending #34: whether the Agent SDK session under T3 Code loads project settings and hooks (`settingSources`) and fires this hook with `session_id`/`cwd`.
+- Fallback if the hook does not fire: varjo detects PR creation through the poller (a new PR for a branch tied to a tracked thread) and runs the handoff prompt as a message into the originating thread via MCP.
+- Output goes through a `HandoffStore` interface keyed by repo + PR number + head SHA; backend per O1. Failure handling: the hook exits 0 always (never blocks PR creation); failures are logged and surfaced by `varjo status`.
 
 ### 4.10 Cleanup (`varjo cleanup`)
 
-- Trigger: PR seen merged/closed, plus a grace period (configurable) so the transcript stays available. Steps: `claude stop <id>` if running; `claude rm <id>` for `--bg` sessions (refuses on unpushed commits and on uncommitted changes; never run it on a session whose worktree is shared with another live session, because it deletes that worktree); `git worktree remove` (after `git worktree unlock` if locked) for `-p`-created and VarjoManaged worktrees; `claude purge <worktree path> --dry-run` then `-y` only for worktree paths, never the main checkout (whether purge touches shared memory is unconfirmed).
-- Raise `cleanupPeriodDays` on botPC so transcripts of long-lived PRs survive (claude-code.md §13). Failure handling: anything refused (unpushed, dirty) is reported, not forced.
+- Trigger: PR seen merged/closed, plus a grace period (configurable) so the thread stays available. Steps: stop the thread via MCP if running; remove varjo-managed worktrees with `git worktree remove` (after `git worktree unlock` if locked); T3-created worktrees are removed per the O3 outcome.
+- Interaction with T3 Code's worktree cleanup setting: it must not delete worktrees varjo still tracks. The exact setting and behavior are documented by #15. Never remove the main checkout.
+- Failure handling: anything refused (unpushed, dirty) is reported, not forced.
 
 ### 4.11 Power manager
 
@@ -171,14 +188,14 @@ CREATE TABLE prs (
   UNIQUE (repo_id, number)
 );
 
-CREATE TABLE sessions (
+CREATE TABLE sessions (                    -- one row per PR; maps to one T3 Code thread
   id INTEGER PRIMARY KEY,
   pr_id INTEGER NOT NULL REFERENCES prs(id),
-  claude_session_id TEXT NOT NULL UNIQUE,  -- UUID passed via --session-id
-  launch_mode TEXT NOT NULL CHECK (launch_mode IN ('M2')),  -- M1 rejected by #11; column kept for future modes
-  bg_id TEXT,                              -- id printed by `claude --bg --resume`; read sessionId/state from `claude agents --json`
-  rc_url TEXT,                             -- claude.ai/code/<id> when known
-  worktree_path TEXT, worktree_owner TEXT CHECK (worktree_owner IN ('claude','varjo')),
+  t3_thread_id TEXT NOT NULL UNIQUE,       -- thread id returned by t3_thread_launch
+  launcher TEXT NOT NULL CHECK (launcher IN ('t3')),  -- column kept so the CLI fallback can be added
+  t3_thread_url TEXT,                      -- link to open the thread in the T3 Code app
+  t3_environment TEXT,                     -- T3 Code environment id or name
+  worktree_path TEXT, worktree_owner TEXT CHECK (worktree_owner IN ('t3','varjo')),
   branch TEXT, head_sha TEXT,              -- commit the session last saw
   last_event_id INTEGER REFERENCES events(id),
   last_run_at TEXT,
@@ -209,13 +226,14 @@ CREATE TABLE runs (
   id INTEGER PRIMARY KEY,
   session_id INTEGER NOT NULL REFERENCES sessions(id),
   purpose TEXT NOT NULL CHECK (purpose IN ('summarize','followup','fix','handoff','recover')),
-  launch_mode TEXT NOT NULL,
-  args_json TEXT NOT NULL,                 -- argv, secrets redacted
+  launcher TEXT NOT NULL,
+  request_json TEXT NOT NULL,              -- the MCP request, secrets redacted
   started_at TEXT NOT NULL, finished_at TEXT, duration_ms INTEGER,
-  exit_code INTEGER, is_error INTEGER,
+  is_error INTEGER,
   api_error TEXT, api_error_status INTEGER, terminal_reason TEXT,
   limit_kind TEXT,                         -- session | weekly | opus | sonnet | NULL
-  num_turns INTEGER, total_cost_usd REAL,  -- trend signal only, not billing
+  num_turns INTEGER, total_cost_usd REAL,  -- trend signal only, not billing; NULL if T3 Code does not expose it
+  t3_run_status TEXT,                      -- thread/turn status as reported by T3 Code
   result_path TEXT, log_path TEXT
 );
 
@@ -243,64 +261,64 @@ CREATE TABLE limit_state (                 -- single row: limits are per account
 ## 6. Flows
 
 **(a) New review detected, summary, notification**
-1. launchd runs `varjo poll`; the guard checks `limit_state.blocked_until` (skip claude work if blocked).
+1. launchd runs `varjo poll`; the guard checks `limit_state.blocked_until` (skip T3 work if blocked).
 2. The GitHub adapter inserts new review/comment events; duplicates are rejected by the unique key.
-3. The handler groups new events by PR, upserts `prs`, and claims the session lease (creating `sessions` with a fresh UUID if none exists).
-4. The worktree manager ensures the worktree at the PR head.
-5. The launcher runs the headless `-p --session-id <uuid>` summary with `--json-schema` (data passed as delimited input), then arms ahead with `claude --bg --resume <uuid> --remote-control --permission-mode <mode> -n pr-<n>` and reads the URL from `claude logs <bg-id>`.
-6. The result is recorded in `runs`; events are marked `processed`; `sessions.state` becomes `awaiting_user`.
-7. The notifier sends the summary with the `rc_url`; `notifications.dedup_key` prevents duplicates.
+3. The handler groups new events by PR, upserts `prs`, and claims the session lease.
+4. The worktree manager ensures the worktree at the PR head per O3.
+5. The launcher calls `t3_thread_launch` with the project, the workspace mode per O3, the read-only summary permission mode (exact T3 mapping recorded by #32), the model per repo config, and the prompt (fixed template plus review text in a delimited data block). It waits with `t3_thread_wait` (bounded), then `t3_thread_read` to extract and validate the JSON summary.
+6. The result is recorded in `runs`; events are marked `processed`; `sessions.state` becomes `awaiting_user`; varjo stores `t3_thread_id` and `t3_thread_url`.
+7. The summary is visible on the phone as the thread's last assistant turn; T3 push notifies "finished". No varjo notification is sent unless the optional adapter is configured (`notifications.dedup_key` prevents duplicates).
 
 **(b) Follow-up review on the same PR**
 1. The poller finds new events for a PR with an open session (unique index guarantees one).
-2. The worktree manager refreshes the tip if `head_sha` changed.
-3. `claude stop <bg-id>`, then `claude -p --resume <uuid> ...`, then `claude respawn <bg-id>` (same session id and URL). If the session is still live in another process, or the bg entry is stopped but retained, do not call `--bg --resume` again (it starts a copy); varjo waits for the lease or defers to the next cycle rather than forking.
-4. `last_event_id`, `last_run_at` and the run are recorded; the notifier sends the new summary.
+2. The worktree manager refreshes the tip if `head_sha` changed and the thread is idle.
+3. The launcher sends the new review as a message into the same thread (MCP message tool), then waits and reads as in (a).
+4. `last_event_id`, `last_run_at` and the run are recorded.
 
-**(c) User continues the session from the phone**
-- The notification carries the summary and the `claude.ai/code/session_01...` URL (arm-ahead, section 4.3). It opens in the Claude app (or browser, or Desktop's session list) with the headless history visible; the session is already RC-connected and held by `--bg`. The user sends instructions and answers permission prompts; RC push notifications cover "Claude finished / needs a decision". The phone never needs SSH.
-- `varjo open <pr>` is an optional convenience on botPC/mainPC: it prints or opens the stored `rc_url`, or runs `claude respawn <bg-id>` first if the bg entry is stopped. Phone-initiated work that no event triggered is Phase 4 (server mode).
-- The user must not resume the same session on two machines at once (auto-memory.md). Phase 2 pushes require human approval in the RC prompt.
+**(c) User continues from the phone or mainPC**
+- The user opens the thread in the T3 Code mobile, desktop or web app. Messages and approvals happen in T3's UI; nothing in varjo is needed.
+- `varjo open <pr>` prints the stored `t3_thread_url`.
+- Phase 2 pushes require human approval in the thread. Phone-initiated work that no event triggered is the T3 mobile app starting a thread (Phase 4).
 
 **(d) Usage limit hit**
-1. A run returns `is_error`, `api_error`, 429, the limit text, or `rate_limit_event` rejected.
-2. The guard parses the reset time, sets `blocked_until = reset + jitter`, records `limit_kind`.
-3. If `last_notified_window` differs, a `limit_blocked` notification is sent once; otherwise silent.
-4. The affected events stay `queued` (no retry in this cycle). Later polls skip claude work until `blocked_until`; polling GitHub may continue.
-5. After the reset, one probe run is allowed; on success send "resumed" and drain the queue serially. At about 90% utilization new jobs are held until `resetsAt`.
+1. A thread fails or stalls with the limit text.
+2. The guard classifies it from `t3_thread_read` output (signals and parsing pending #8), sets `blocked_until = reset + jitter`, and records `limit_kind`.
+3. The block is surfaced once per window: recorded, shown in `varjo status`, and sent through the optional adapter if configured. No "limit" thread is started.
+4. The affected events stay `queued` (no retry in this cycle). Later polls skip T3 work until `blocked_until`; polling GitHub may continue.
+5. After the reset, one probe run is allowed; on success the queue drains serially.
 
 **(e) botPC reboot**
-1. launchd starts `com.varjo.recover` at load (and `com.varjo.poll` on schedule).
-2. Recovery waits for network, runs `claude agents` to start the supervisor, then `claude respawn <id>` per session (or `--all`; reboot behavior unverified).
-3. It reconciles `sessions` with `claude agents --json`: restored sessions go back to their prior state; unrestored ones become `stopped`; expired leases are cleared.
-4. A "botPC restarted" notification is sent. In-flight runs found without `finished_at` are marked failed and their events requeued (idempotent). Sessions that respawn cannot restore are re-armed by the next event.
+1. The T3 Code launchd service (`t3 up`) restarts itself; launchd starts `com.varjo.poll` on schedule.
+2. At the start of the next poll, varjo reconciles `sessions` with `t3_thread_list`: threads that are missing become `stopped` and are re-launched on the next event; expired leases are cleared.
+3. In-flight runs found without `finished_at` are marked failed and their events requeued (idempotent).
 
 **(f) PR merged/closed, cleanup**
 1. The poller sees `state` change to `merged`/`closed`; `prs.closed_at` is set; the session moves to `closed` after the grace period.
-2. `varjo cleanup` stops a running session, runs `claude rm <id>` (unless the worktree is shared with another live session) and `git worktree remove` for worktrees `claude rm` will not touch.
-3. Refusals (unpushed commits, uncommitted changes) are reported via notification and left in place.
-4. Optionally `claude purge <worktree path>` for the session's own project key; memory files are never touched by varjo.
+2. `varjo cleanup` stops the thread via MCP and removes the worktree per O3 (`git worktree remove` for varjo-managed ones).
+3. T3 Code's worktree cleanup setting must not delete worktrees varjo still tracks; the interaction is documented by #15.
+4. Refusals (unpushed commits, uncommitted changes) are reported and left in place.
 
 ## 7. Phase mapping
 
-Phase 1: 4.1-4.7, 4.11 (M2 + arm-ahead), cleanup minimal. Phase 2: `acceptEdits` runs, approvals through RC. Phase 3: 4.8, 4.9. Phase 4: phone-initiated tasks (RC server mode `claude remote-control --spawn worktree` is the candidate; confirmed present on 2.1.306 and working detached with nohup and no TTY, but `--session-id` only reattaches server-mode-created `session_01...` ids, so it is not a hand-back path for headless sessions; claude-code.md §8, #11), Jira adapter.
+Phase 1: poller, store, T3 launcher, summary schema, guard, `com.varjo.poll`, power manager (4.11), minimal cleanup. Phase 2: auto-accept-edits runs; pushes approved in T3's UI. Phase 3: memory sync (4.8), handoff (4.9). Phase 4: phone-initiated tasks are simply the T3 mobile app starting a thread (no varjo code); Jira adapter via the same `EventSource` interface; optional GitHub webhook adapter (O5 route 3).
 
 ## 8. Security model
 
 | Requirement | Mechanism |
 |---|---|
-| No inbound ports on botPC (§6) | RC and Claude use outbound HTTPS only; poller is outbound `gh`; no varjo server or webhook. Caveat: Desktop-SSH fallback and the rsync memory sync need sshd on a private path (Tailscale with explicit ACLs, or LAN); never public (§6 candidate 3) |
-| No credentials on custom cloud (§6) | Notifier webhooks/tokens are outbound-only secrets stored in 0600 file or Keychain; no varjo-owned relay server |
-| Least-privilege GitHub/AWS (§6, §10) | GitHub token scoped to PR read (+ push to non-default branches in Phase 2); no AWS access in Phase 1; Claude gets only the tool allowlist |
-| No direct pushes to `main` (§6) | Phase 1 has no push tool; Phase 2 pushes need human approval via RC prompt; branch protection on GitHub as the backstop |
-| Human approval for production (§6) | No production credentials on botPC; `dontAsk` denies any unlisted tool; `acceptEdits` limited to the worktree |
-| No arbitrary external command execution (§10) | Events only select a PR and a fixed prompt template; no command text from events reaches a shell; `--permission-prompts none` denies rather than asks |
-| PR comments are untrusted (§10) | Poller fetches text; it is placed in the prompt inside a clearly delimited data block (via stdin, 10 MB cap) with an instruction to treat it as data; read-only allowlist means an injected instruction cannot edit, push or exfiltrate via `Bash`; optional per-repo reviewer allowlist (proposed config); notification text is truncated plain text |
-| Minimum privileges for automation (§10) | Separate OS credentials for botPC (D2); never copy mainPC credentials; `ANTHROPIC_API_KEY` never set; `--bare` never used; usage credits OFF; only memory directories synced from `~/.claude` |
+| No inbound ports on botPC (§6) | T3 Connect is an outbound tunnel; LAN and Tailscale pairing stay private; the poller is outbound `gh`; no varjo server or webhook. sshd is needed only for memsync, over a private path (Tailscale with explicit ACLs, or LAN); never public (§6 candidate 3) |
+| No credentials on custom cloud (§6) | T3 Connect holds device-auth tokens for the relay and, only if enabled, held webhook bodies (up to 24 h); this is the §6 trade-off recorded as O4. Claude credentials never leave botPC. varjo's MCP OAuth credential is stored 0600 on botPC and never synced; optional notifier webhooks/tokens are outbound-only secrets in a 0600 file or Keychain; no varjo-owned relay server |
+| Least-privilege GitHub/AWS (§6, §10) | GitHub token scoped to PR read (+ push to non-default branches in Phase 2); no AWS access in Phase 1; varjo's MCP sign-in is approved at the lowest level that allows `t3_thread_launch`; varjo-launched threads use a read-only mode in Phase 1 and auto-accept edits inside the worktree in Phase 2; T3 managed policy caps the maximum mode |
+| No direct pushes to `main` (§6) | Phase 1 has no push tool; Phase 2 pushes need human approval in T3's UI; branch protection on GitHub as the backstop |
+| Human approval for production (§6) | No production credentials on botPC; read-only mode denies unlisted tools; auto-accept edits is limited to the worktree |
+| No arbitrary external command execution (§10) | Events only select a PR and a fixed prompt template; no command text from events reaches a shell; a thread started over MCP cannot exceed the level its sign-in was approved with |
+| PR comments are untrusted (§10) | Review text goes into a delimited data block in the prompt (poller route) or through T3's `{{path}}` template (webhook route, which has injection hardening) with an instruction to treat it as data; read-only mode means an injected instruction cannot edit, push or exfiltrate via Bash; optional per-repo reviewer allowlist (proposed config); optional notification text is truncated plain text |
+| Minimum privileges for automation (§10) | Separate OS credentials for botPC (D2); never copy mainPC credentials; `ANTHROPIC_API_KEY` never set; usage credits OFF; only memory directories synced from `~/.claude` |
 | Idempotency, no concurrent PR writes (§10) | Unique event key; session lease; unique open-session index; global single-run slot |
-| Traceability (§10) | `runs` and `notifications` tables, `claude logs`, per-run `log_path` |
-| What is sent to Anthropic (§6) | Prompts, file contents and command output read by tools, PR diffs and review text, and, while RC is connected, the session transcript (stored on Anthropic servers, retention per its data-usage policy). Inference is always in Anthropic's cloud (requirements §6). Not available under ZDR/HIPAA organizations |
-| Credential isolation | `claude auth login` credential used for RC/`--bg`; `setup-token` token only in headless child env (never plist-global, never logged); both single-user, no sharing (max-plan.md §2) |
+| Traceability (§10) | `runs` and `notifications` tables, T3 Code thread history, per-run `log_path` |
+| What is sent where (§6) | Prompts, file contents and command output read by tools, PR diffs and review text go to Anthropic (inference is always in Anthropic's cloud, requirements §6). While T3 Connect is used, thread traffic transits the relay (end-to-end over the tunnel; the relay docs say bodies and tokens are kept out of traces). T3 telemetry per `docs/user/telemetry.md` (opt-out to record) |
+| Credential isolation | One `claude auth login` credential, used by T3 Code only; varjo holds no Claude credential; single-user, no sharing (max-plan.md §2) |
+| Update pinning | T3 Code is pre-1.0 with 1-2 stable releases a week plus nightlies; botPC pins a stable version and upgrades deliberately (policy item in #16) |
 | Root privilege | Only `pmset` with fixed argument sets via `/etc/sudoers.d/varjo` (4.11); no other sudo; varjo never runs as root |
 
 ## 9. Open decisions
@@ -315,40 +333,64 @@ Phase 1: 4.1-4.7, 4.11 (M2 + arm-ahead), cleanup minimal. Phase 2: `acceptEdits`
 
 Recommendation: (c). `HandoffStore` is an interface, so (a) or (b) can be added as an opt-in export later.
 
-### O2. Notification channel to mainPC and phone (needs user decision)
+### O2. Notification channel to mainPC and phone (needs user decision; depends on O4)
 
 | Option | Pros | Cons |
 |---|---|---|
-| (a) Discord webhook | Already used with Claude Code's Discord plugin; replies could later flow back; phone push | Third-party service sees summaries; webhook URL is a secret |
-| (b) ntfy (self-hosted or ntfy.sh private topic) | Simple push to phone and Mac; no account coupling | ntfy.sh topic is a shared secret; self-hosting needs a reachable host |
-| (c) macOS Notification Center via SSH | No third party | mainPC only, no phone; needs sshd/private path |
-| (d) Email | Universal | Slow, noisy, summaries stored in a mailbox |
+| (a) T3 push (default) | No varjo code; covers finish / fail / approval / question; works on the phone | Requires T3 Connect (O4); only for events that have a thread, so no limit or reboot alerts |
+| (b) Discord webhook (optional adapter) | Works without T3 Connect; can carry limit/reboot alerts; phone push | Third-party service sees summaries; webhook URL is a secret |
+| (c) ntfy (optional adapter; self-hosted or ntfy.sh private topic) | Simple push to phone and Mac; no account coupling | ntfy.sh topic is a shared secret; self-hosting needs a reachable host |
+| (d) macOS Notification Center via SSH | No third party | mainPC only, no phone; needs sshd/private path |
+| (e) Email | Universal | Slow, noisy, summaries stored in a mailbox |
 
-Recommendation: (a) Discord first, (b) ntfy as the second adapter; keep summaries free of file contents beyond what the template needs.
+Recommendation: (a) as the default with T3 Connect. Add an adapter only for Tailscale-only setups or for limit/reboot alerts: Discord first, ntfy second; keep summaries free of file contents beyond what the template needs.
 
 ### O3. Worktree ownership (needs user decision, decided by experiment #15)
 
 | Option | Pros | Cons |
 |---|---|---|
-| Claude's `--worktree "#<n>"` | Less code; `claude rm` cleanup for `--bg` sessions | Tip is not refreshed on reuse; `-p` runs leave worktrees; reuse across runs unconfirmed (claude-code.md §5) |
-| varjo-managed `git worktree` under a configurable root | Full control of tip, location and cleanup | More code; `claude rm` will not remove it |
+| (a) T3 Code `new worktree` per thread | Less code; T3 Code handles creation | T3 names the branch and picks the location; varjo must still fetch `pull/<n>/head` into it and refresh the tip |
+| (b) varjo-managed `git worktree` at `pull/<n>/head`, passed as `existing worktree` | Exact, refreshable PR head; full control of tip, location and cleanup | More code; varjo removes the worktree itself and must coexist with T3's cleanup setting |
 
-Recommendation: default to `ClaudeManaged` if Phase 0 shows a second `--worktree "#<n>"` run reuses the worktree and varjo can fast-forward it; otherwise `VarjoManaged`. Note that #15 as written covers CLAUDE.md/rules in worktrees, so the reuse check needs adding to it (or to #10).
+Recommendation: (b), because the PR head must be exact and refreshable; decided by #15.
+
+### O4. T3 Connect vs Tailscale-only (needs user decision, decided after #31)
+
+| Option | Pros | Cons |
+|---|---|---|
+| (a) T3 Connect | Push notifications; phone access over mobile data; held webhooks | Third-party relay (Clerk auth, device-auth tokens on the relay, held webhook bodies if enabled); 3-machine free cap; pricing may change |
+| (b) Tailscale-only | Everything first-party; no relay | No push; the phone needs the tailnet |
+
+Recommendation: (a) with "Require approval for new devices" on and held webhooks off; record in #30 decision 1 after #31.
+
+### O5. Trigger route (needs user decision, decided by #33)
+
+| Option | Pros | Cons |
+|---|---|---|
+| (1) varjo poller to MCP (default) | No webhook rights needed; dedup in SQLite; already designed | Polling latency; needs the poller and an MCP credential |
+| (2) T3 interval task only | No varjo trigger code | Expected unsuitable: fixed workspace per task, dedup in prompts |
+| (3) GitHub webhook to T3 Connect relay to T3 webhook task (optional adapter) | Immediate; relay can hold hooks up to 24 h while botPC is offline | Needs webhook admin on the repo and T3 Connect; held bodies on the relay |
+
+Recommendation: (1) as the default, (3) as an optional adapter for repos with webhook admin.
 
 ## 10. What Phase 0 must confirm before Phase 1
 
-- #7: lid-closed stability, sleep prevention (RC needs the Mac awake and the process running, remote-access.md §B).
-- #8: dedicated login on botPC works; `setup-token` + `CLAUDE_CODE_OAUTH_TOKEN` works in launchd with `ANTHROPIC_API_KEY` unset and no `--bare` (claude-code.md §18.8); `claude auth status` output shape for the login assertion; the two credentials do not clobber each other (max-plan.md open questions).
-- #9: Desktop SSH fallback connects over the private path; sign-in expiry when mainPC sleeps.
-- #10: `claude -p --resume` keeps context across cwds (§18.2); exit codes and JSON for usage limit, expired login, bad token, `--max-turns` (§18.3); `rate_limit_event` in plain `json` mode; time zone of "resets".
-- #11 (resolved 2026-11-02, Pass on Claude Code 2.1.306): M2 + arm-ahead selected (`-p --session-id`, then `--bg --resume --remote-control`; URL from `claude logs`; `claude respawn` keeps id and URL). Remaining on botPC: V3 from a second Mac, V7 after reboot (including whether `claude respawn --all` restores sessions), server mode under launchd and the documented 10-minute outage exit.
-- #12: phone drives an RC session (messages, permission prompts, push); the arm-ahead URL in flow (c) already removes the need for SSH.
-- #13: Dispatch confirmation only (out of scope by decision).
-- #14: memory sync viability: identical-path keys, `autoMemoryDirectory` per-repo values, symlink behavior, external edits during a live session, sync direction; whether `claude purge` of a worktree path leaves memory intact.
-- #15 (plus worktree reuse): CLAUDE.md and rules in worktrees; second `--worktree "#<n>"` run reuses the worktree; `claude rm` on `-p` worktrees; pushing fixes from a `#<n>` worktree (decides O3).
-- Hooks: `PostToolUse` with `if: "Bash(gh pr create *)"` firing in `-p` with `session_id`/`cwd`; Stop/SessionEnd/Notification stdin JSON (claude-code.md §18.9-10); `--from-pr` and `-p` sessions (§18.5).
-- Policy: re-check whether the paused programmatic-usage split for `claude -p` is revived (max-plan.md §1); whether "ordinary, individual usage" covers a persistent poller (max-plan.md §2).
-- #16 (security baseline): confirm the allowlist is sufficient for a useful summary without `gh api`; reviewer allowlist default.
+- #7: lid-closed stability, sleep prevention (the `t3 up` service and the Claude process need the Mac awake).
+- #8 (re-scoped): T3 Code picks up the dedicated `claude auth login` on botPC; the `t3 up` service environment (including `ANTHROPIC_API_KEY` unset); limit observability via MCP (thread state and `t3_thread_read` output at a limit, reset text); Max terms via the SDK (= #30 decision 3, including whether the paused programmatic-usage split is revived, max-plan.md §1).
+- #31 (replaces #9): T3 Connect vs Tailscale-only (O4): phone over mobile data, push, device approval, held webhooks off, what the relay stores.
+- #32 (top priority, replaces #11): end-to-end MCP launch: OAuth sign-in and access level for varjo; `t3_thread_launch` with project, workspace mode, permission mode and model; `t3_thread_wait` and `t3_thread_read` returning the fenced JSON summary; a follow-up message into the same thread; exact T3 mode for the read-only summary; thread visible on the phone with a "finished" push.
+- #34: the Agent SDK session under T3 Code loads CLAUDE.md, rules, settings, hooks and memory (`settingSources`, `CLAUDE_CONFIG_DIR`); the `PostToolUse` handoff hook fires with `session_id`/`cwd`; memory key cross-check for #14.
+- #10 (re-scoped): toolchains and `gh` are available in the `t3 up` service environment; the read-only summary is useful with the allowlist.
+- #33: trigger routes (O5): whether a T3 interval task can serve the poller's job; the webhook route via the T3 Connect relay; decides O5.
+- #12 (re-scoped): the T3 mobile app drives a thread: messages, approvals, push.
+- #15 (re-scoped): worktree lifecycle for T3-created and varjo-created worktrees: `pull/<n>/head` fetch and refresh, pushing fixes from the worktree, T3's worktree cleanup setting against tracked worktrees (decides O3).
+- #14: memory sync viability: identical-path keys, `autoMemoryDirectory` per-repo values, symlink behavior, external edits during a live thread, sync direction.
+- #16 (security baseline, extended): the read-only allowlist is sufficient for a useful summary without `gh api`; reviewer allowlist default; T3 managed policy cap; MCP access levels; update pinning policy; telemetry opt-out.
+- Closed: #9, #11 (result kept as the CLI fallback), #13.
+
+Order: #7 #8, then #31, then #32, then #34 #10, then #33, then #12 #15, then #14, then the #30 decision, then the docs revision.
+
+Fallback rule: if #32 or #34 fails, return to the CLI launcher recorded in git history (commit 8bdc33d, issue #11) and reopen the Remote Control items.
 
 ## 11. Repository layout (proposed)
 
@@ -357,14 +399,14 @@ varjo/
   src/
     adapters/github/   # EventSource: gh/API polling, normalization, PR state
     store/             # SQLite schema, migrations, leases, dedup queries
-    launcher/          # SessionLauncher, HeadlessBgLauncher (M2 + arm-ahead)
-    worktree/          # ClaudeManaged and VarjoManaged strategies
-    notifier/          # Notifier interface, discord/, ntfy/, ...
+    t3/                # SessionLauncher, T3McpLauncher: MCP client, OAuth credential handling, thread launch/message/read/wait
+    worktree/          # T3Managed and VarjoManaged strategies
+    notifier/          # optional adapters: Notifier interface, discord/, ntfy/
     limits/            # usage-limit detection, reset parsing, blocked_until
-    cleanup/           # PR-closed policy: claude rm/purge, git worktree remove
+    cleanup/           # PR-closed policy: stop thread, git worktree remove
     cli/               # varjo poll | status | open <pr> | cleanup
-  hooks/               # pr-handoff.sh (PostToolUse), stop hook shim
-  launchd/             # com.varjo.poll.plist, com.varjo.recover.plist, com.varjo.memsync.plist
+  hooks/               # pr-handoff.sh (PostToolUse; pending #34)
+  launchd/             # com.varjo.poll.plist, com.varjo.memsync.plist
   scripts/             # memsync.sh, install helpers
   docs/                # requirements.md, research/, design/
 ```
